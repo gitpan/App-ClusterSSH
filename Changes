@@ -1,4 +1,11 @@
-0000-00-00 Duncan Ferguson <duncan_ferguson@user.sf.net> - v4.00_01
+2010-06-19 Duncan Ferguson <duncan_ferguson@user.sf.net> - v4.00_02
+
+* Add in bugtracker and homepage resources to Build.PL file
+* Bring new module App::ClusterSSH::Host into play for parsing host strings
+* Patch to override font used on command line (Roland Rosenfeld)
+* Put options in cssh pod into alphabetical order
+
+2010-01-08 Duncan Ferguson <duncan_ferguson@user.sf.net> - v4.00_01
 
 * Remove GNU tools and switch to Perl module layout using Module::Build
 

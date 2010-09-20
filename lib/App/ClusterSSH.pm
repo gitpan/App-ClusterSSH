@@ -3,7 +3,7 @@ package App::ClusterSSH;
 use 5.008.004;
 use warnings;
 use strict;
-use version; our $VERSION = version->new('4.00_05');
+use version; our $VERSION = version->new('4.00_06');
 
 use Carp;
 
@@ -32,6 +32,7 @@ use Net::hostent;
 use Carp;
 use Sys::Hostname;
 use English;
+use Socket;
 
 # Notes on general order of processing
 #
@@ -66,8 +67,8 @@ sub REAPER {
 # Command line options list
 my @options_spec = (
     'debug:+',
-    'd',                   # backwards compatibility - DEPRECATED
-    'D',                   # backwards compatibility - DEPRECATED
+    'd',    # backwards compatibility - DEPRECATED
+    'D',    # backwards compatibility - DEPRECATED
     'version|v',
     'help|h|?',
     'man|H',
@@ -87,6 +88,8 @@ my @options_spec = (
     'title|T=s',
     'output-config|u',
     'font|f=s',
+    'list|L',
+    'use_all_a_records|A',
 );
 my %options;
 my %config;
@@ -248,6 +251,8 @@ sub load_config_defaults() {
     $config{menu_host_autotearoff}          = 0;
 
     $config{send_menu_xml_file} = $ENV{HOME} . '/.csshrc_send_menu';
+
+    $config{use_all_a_records} = 0;
 }
 
 # load in config file settings
@@ -386,6 +391,10 @@ sub check_config() {
     $config{show_history} = 1 if $options{'show-history'};
 
     $config{command} = $options{action} if ( $options{action} );
+
+    if ( $options{use_all_a_records} ) {
+        $config{use_all_a_records} = !$config{use_all_a_records} || 0;
+    }
 }
 
 sub load_configfile() {
@@ -412,6 +421,12 @@ sub dump_config {
         print "$_=$config{$_}\n";
     }
     exit_prog if ( !$noexit );
+}
+
+sub list_tags {
+    print( 'Available cluster tags:', $/ );
+    print "\t", $_, $/ foreach ( sort( keys(%clusters) ) );
+    exit_prog;
 }
 
 sub check_ssh_hostnames {
@@ -697,6 +712,22 @@ sub resolve_names(@) {
 
         if ( $dirty =~ s/^(.*)@// ) {
             $username = $1;
+        }
+        if (   $config{use_all_a_records}
+            && $dirty !~ m/^(\d{1,3}\.?){4}$/
+            && !defined( $clusters{$dirty} ) )
+        {
+            my $hostobj = gethostbyname($dirty);
+            if ( defined($hostobj) ) {
+                my @alladdrs = map { inet_ntoa($_) } @{ $hostobj->addr_list };
+                if ( $#alladdrs > 0 ) {
+                    $clusters{$dirty} = join ' ', @alladdrs;
+                    logmsg( 3, 'Expanded to ', $clusters{$dirty} );
+                }
+                else {
+                    logmsg( 3, 'Only one A record' );
+                }
+            }
         }
         if ( $clusters{$dirty} ) {
             logmsg( 3, '... it is a cluster' );
@@ -1002,9 +1033,9 @@ sub open_client_windows(@) {
 
         my $server_object = App::ClusterSSH::Host->parse_host_string($_);
 
-        my $username=$server_object->get_username();
-        my $port=$server_object->get_port();
-        my $server=$server_object->get_hostname();
+        my $username = $server_object->get_username();
+        my $port     = $server_object->get_port();
+        my $server   = $server_object->get_hostname();
 
         #my ( $username, $server, $port ) = split_hostname($_);
         my $given_server_name = $server_object->get_givenname();
@@ -1319,7 +1350,8 @@ sub retile_hosts {
         logmsg( 3,
             "x:$current_x y:$current_y, r:$current_row c:$current_col" );
 
-        $xdisplay->req( 'UnmapWindow', $servers{$server}{wid} );
+        # sf tracker 3061999
+        # $xdisplay->req( 'UnmapWindow', $servers{$server}{wid} );
 
         if ( $config{unmap_on_redraw} =~ /yes/i ) {
             $xdisplay->req( 'UnmapWindow', $servers{$server}{wid} );
@@ -2152,6 +2184,8 @@ sub run {
 
     get_clusters();
 
+    list_tags() if ( $options{'list'} );
+
     if (@ARGV) {
         @servers = resolve_names(@ARGV);
     }
@@ -2258,6 +2292,8 @@ the code until this time.
 =item  create_windows
 
 =item  dump_config
+
+=item  list_tags
 
 =item  evaluate_commands
 

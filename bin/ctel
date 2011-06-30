@@ -15,13 +15,14 @@ __END__
 
 =head1 NAME
 
-cssh, crsh, ctel - Cluster administration tool
+cssh, crsh, ctel, ccon - Cluster administration tool
 
 =head1 SYNOPSIS
 
 S<< cssh [options] [[user@]<server>[:port]|<tag>] [...] >>
 S<< crsh [options] [[user@]<server>[:port]|<tag>] [...] >>
 S<< ctel [options] [<server>[:port]|<tag>] [...] >>
+S<< ccon [options] [[user@]<server>[:port]|<tag>] [...] >>
 
 =head1 DESCRIPTION
 
@@ -37,7 +38,7 @@ nodes are kept in sync.
 Connections are opened via ssh so a correctly installed and configured
 ssh installation is required.  If, however, the program is called by "crsh"
 then the rsh protocol is used (and the communications channel is insecure),
-or by "ctel" then telnet is used.
+or by "ctel" then telnet is used, or by "ccon" then console is used.
 
 Extra caution should be taken when editing system files such as
 /etc/inet/hosts as lines may not necessarily be in the same order.  Assuming
@@ -47,7 +48,7 @@ changes are committed.
 
 =head2 Further Notes
 
-Please also see L<KNOWN BUGS>.
+Please also see L</KNOWN BUGS>.
 
 =over
 
@@ -65,12 +66,12 @@ that host.  Re-selecting it will plug it back in.
 =item *
 
 If your window manager menu bars are obscured by terminal windows see
-the C<screen_reserve_XXXXX> options in the F<csshrc> file (see L<"FILES">).
+the C<screen_reserve_XXXXX> options in the F<csshrc> file (see L</"FILES">).
 
 =item *
 
 If the terminals overlap too much see the C<terminal_reserve_XXXXX> 
-options in the F<csshrc> file (see L<"FILES">).
+options in the F<csshrc> file (see L</"FILES">).
 
 =item *
 
@@ -82,6 +83,12 @@ communications protocol instead of ssh.
 
 If the code is called as ctel instead of cssh (i.e. a symlink called
 ctel points to the cssh file or the file is renamed) telnet is used as the
+communications protocol instead of ssh.
+
+=item *
+
+If the code is called as ccon instead of cssh (i.e. a symlink called
+ccon points to the cssh file or the file is renamed) console is used as the
 communications protocol instead of ssh.
 
 =item *
@@ -123,7 +130,7 @@ Default options are shown as appropriate.
 
 Run the command in each session, i.e. C<-a 'vi /etc/hosts'> to drop straight
 into a vi session.  NOTE: not all communications methods support this (ssh 
-and rsh should, telnet will not).
+and rsh should, telnet and console will not).
 
 =item --autoquit,-q|--no-autoquit,-Q
 
@@ -132,11 +139,11 @@ Enable|Disable automatically quiting after the last client window has closed
 
 =item --cluster-file,-c <file>
 
-Use supplied file as additional cluster file (see also L<"FILES">)
+Use supplied file as additional cluster file (see also L</"FILES">)
 
 =item --config-file,-C <file>
 
-Use supplied file as additional configuration file (see also L<"FILES">)
+Use supplied file as additional configuration file (see also L</"FILES">)
 
 =item -d 
 
@@ -172,6 +179,11 @@ List available cluster tags.
 
 Show full help test (the man page), and exit
 
+=item --master,-M <master>
+
+The console client program polls master as the primary server, rather than the
+default set at compile time (typically ``console'').
+
 =item --options,-o "-x -o ConnectTimeout=10" - for ssh connections
 
 =item --options,-o ""                        - for rsh connections
@@ -179,7 +191,7 @@ Show full help test (the man page), and exit
 Specify arguments to be passed to ssh or rsh when making the connection.  
 
 B<NOTE:> any "generic" change to the method (i.e. specifying the ssh port to use)
-should be done in the medium's own config file (see L<ssh_config> and 
+should be done in the medium's own config file (see C<ssh_config> and 
 F<$HOME/.ssh/config>).
 
 =item --output-config,-u
@@ -239,7 +251,7 @@ on standard port (e.g not listening on port 22) and ssh_config cannot be used.
 =item <tag> ...
 
 Open a series of xterms defined by <tag> within either /etc/clusters or
-F<$HOME/.csshrc> (see L<"FILES">).
+F<$HOME/.csshrc> (see L</"FILES">).
 
 Note: specifying a username on a cluster tag will override any usernames 
 defined in the cluster
@@ -308,6 +320,10 @@ S<$ ctel -p 2022 server1 server2>
 =item Use rsh instead of ssh
 
 S<$ crsh server1 server2>
+
+=item Use console with master as the primary server instead of ssh
+
+S<$ ccon -M master server1 server2>
 
 =back
 
@@ -456,7 +472,7 @@ arguments).
 B<NOTE:> The given defaults are based on OpenSSH, not commercial ssh software.
 
 B<NOTE:> Any "generic" change to the method (i.e. specifying the ssh port to use)
-should be done in the medium's own config file (see L<ssh_config> and 
+should be done in the medium's own config file (see C<ssh_config> and 
 F<$HOME/.ssh/config>).
 
 =item screen_reserve_top = 0
@@ -739,10 +755,10 @@ and child windows).
 =head1 SEE ALSO
 
 L<http://clusterssh.sourceforge.net/>,
-L<ssh>,
+C<ssh>,
 L<Tk::overview>,
 L<X11::Protocol>,
-L<perl>
+C<perl>
 
 =head1 CREDITS
 

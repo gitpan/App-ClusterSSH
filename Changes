@@ -1,3 +1,15 @@
+2011-06-30 Duncan Ferguson <duncan_ferguson@user.sf.net> - v4.00_09
+* Cater for missing 'pod2text' command (Thanks to Sami Kerola)
+* Fix 'uninitialised variable' error
+* Added 'ccon' command (Thanks to Brandon Perkins)
+
+2011-04-01 Duncan Ferguson <duncan_ferguson@user.sf.net> - v4.00_08
+* Amend all L<xx> links to prevent build breakage on cygwin (Sf bug 3115635)
+
+2011-01-24 Duncan Ferguson <duncan_ferguson@user.sf.net> - v4.00_07
+* Fix for parsing config files with empty values (Stefan Steiner)
+* Reinstate acting on '-l username' option (reported by Ryan Brown)
+
 2010-09-20 Duncan Ferguson <duncan_ferguson@user.sf.net> - v4.00_06
 * Fix test error on 5.8.8 (reported by Wei Wang)
 * Added '--list', '-L' to list available cluster tags (idea from Markus Manzke)

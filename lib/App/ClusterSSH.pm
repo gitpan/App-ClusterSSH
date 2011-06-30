@@ -3,7 +3,7 @@ package App::ClusterSSH;
 use 5.008.004;
 use warnings;
 use strict;
-use version; our $VERSION = version->new('4.00_06');
+use version; our $VERSION = version->new('4.00_09');
 
 use Carp;
 
@@ -79,6 +79,7 @@ my @options_spec = (
     'tile|g',
     'no-tile|G',
     'username|l=s',
+    'master|M=s',
     'options|o=s',
     'port|p=i',
     'autoquit|q',
@@ -227,6 +228,8 @@ sub load_config_defaults() {
 
     $config{comms} = "telnet" if ( $config{comms} eq "tel" );
 
+    $config{comms} = "console" if ( $config{comms} eq "con" );
+
     $config{ $config{comms} } = $config{comms};
 
     $config{ssh_args} = " -x -o ConnectTimeout=10"
@@ -234,6 +237,8 @@ sub load_config_defaults() {
     $config{rsh_args} = "";
 
     $config{telnet_args} = "";
+
+    $config{console_args} = "";
 
     $config{extra_cluster_file} = "";
 
@@ -269,6 +274,8 @@ sub parse_config_file($) {
             ;    # ignore blank lines & commented lines
         $l =~ s/#.*//;     # remove comments from remaining lines
         $l =~ s/\s*$//;    # remove trailing whitespace
+
+        # look for continuation lines
         chomp $l;
         if ( $l =~ s/\\\s*$// ) {
             $l .= <CFG>;
@@ -277,8 +284,10 @@ sub parse_config_file($) {
 
         next unless $l =~ m/\s*(\S+)\s*=\s*(.*)\s*/;
         my ( $key, $value ) = ( $1, $2 );
-        $config{$key} = $value;
-        logmsg( 3, "$key=$value" );
+        if ( defined $key && defined $value ) {
+            $config{$key} = $value;
+            logmsg( 3, "$key=$value" );
+        }
     }
     close(CFG);
 
@@ -345,8 +354,8 @@ sub check_config() {
 
     # make sure comms in an accepted value
     die
-        "FATAL: Only ssh, rsh and telnet protocols are currently supported (comms=$config{comms})\n"
-        if ( $config{comms} !~ /^(:?[rs]sh|telnet)$/ );
+        "FATAL: Only ssh, rsh, telnet, and console/conserver protocols are currently supported (comms=$config{comms})\n"
+        if ( $config{comms} !~ /^(:?[rs]sh|telnet|console)$/ );
 
     # Set any extra config options given on command line
     $config{title} = $options{title} if ( $options{title} );
@@ -370,6 +379,9 @@ sub check_config() {
     $config{window_tiling} = "no"  if $options{'no-tile'};
 
     $config{user} = $options{username} if ( $options{username} );
+
+    $config{mstr} = $options{master} if ( $options{master} );
+
     $config{terminal_args} = $options{'term-args'}
         if ( $options{'term-args'} );
 
@@ -922,6 +934,7 @@ sub setup_helper_script() {
 		my \$svr=shift;
 		my \$user=shift;
 		my \$port=shift;
+		my \$mstr=shift;
 		my \$command="$config{$config{comms}} $config{$config{comms}."_args"} ";
 		open(PIPE, ">", \$pipe) or die("Failed to open pipe: \$!\\n");
 		print PIPE "\$\$:\$ENV{WINDOWID}" 
@@ -933,6 +946,12 @@ sub setup_helper_script() {
 			warn("\\nWARNING: failed to resolve IP address for \$svr.\\n\\n"
 			);
 			sleep 5;
+		}
+		if(\$mstr) {
+			unless("$config{comms}" ne "console") {
+				\$mstr = \$mstr ? "-M \$mstr " : "";
+				\$command .= \$mstr;
+			}
 		}
 		if(\$user) {
 			unless("$config{comms}" eq "telnet") {
@@ -1036,6 +1055,7 @@ sub open_client_windows(@) {
         my $username = $server_object->get_username();
         my $port     = $server_object->get_port();
         my $server   = $server_object->get_hostname();
+        my $master   = $server_object->get_master();
 
         #my ( $username, $server, $port ) = split_hostname($_);
         my $given_server_name = $server_object->get_givenname();
@@ -1075,8 +1095,12 @@ sub open_client_windows(@) {
         $servers{$server}{connect_string} = $_;
         $servers{$server}{givenname}      = $given_server_name;
         $servers{$server}{realname}       = $realname;
-        $servers{$server}{username}       = $username;
+        $servers{$server}{username}       = $config{user};
+        $servers{$server}{username}       = $username if ($username);
+        $servers{$server}{username}       = $username || '';
         $servers{$server}{port}           = $port || '';
+        $servers{$server}{master}         = $config{mstr};
+        $servers{$server}{master}         = $master if ($master);
 
         logmsg( 2, "Working on server $server for $_" );
 
@@ -1100,7 +1124,7 @@ sub open_client_windows(@) {
           # affecting the main program
             $servers{$server}{realname} .= "==" if ( !$realname );
             my $exec
-                = "$config{terminal} $color $config{terminal_args} $config{terminal_allow_send_events} $config{terminal_title_opt} '$config{title}: $servers{$server}{connect_string}' -font $config{terminal_font} -e \"$^X\" \"-e\" '$helper_script' '$servers{$server}{pipenm}' '$servers{$server}{givenname}' '$servers{$server}{username}' '$servers{$server}{port}'";
+                = "$config{terminal} $color $config{terminal_args} $config{terminal_allow_send_events} $config{terminal_title_opt} '$config{title}: $servers{$server}{connect_string}' -font $config{terminal_font} -e \"$^X\" \"-e\" '$helper_script' '$servers{$server}{pipenm}' '$servers{$server}{givenname}' '$servers{$server}{username}' '$servers{$server}{port}' '$servers{$server}{master}'";
             logmsg( 2, "Terminal exec line:\n$exec\n" );
             exec($exec) == 0 or warn("Failed: $!");
         }
@@ -1770,7 +1794,10 @@ sub create_windows() {
         -buttons    => ['Close'],
     );
 
-    my $manpage = `pod2text -l -q=\"\" $0`;
+    my $manpage = `pod2text -l -q=\"\" $0 2>/dev/null`;
+    if(!$manpage) {
+        $manpage = "Help is missing.\nSee that command 'pod2text' is installed and in PATH.";
+    }
     $windows{mantext}
         = $windows{manpage}->Scrolled( "Text", )->pack( -fill => 'both' );
     $windows{mantext}->insert( 'end', $manpage );
@@ -2254,7 +2281,7 @@ App::ClusterSSH - A container for functions of the ClusterSSH programs
 =head1 SYNOPSIS
 
 There is nothing in this module for public consumption.  See documentation
-for F<cssh>, F<crsh>, F<ctelnet>, or F<cscp> instead.
+for F<cssh>, F<crsh>, F<ctel>, F<ccon>, or F<cscp> instead.
 
 =head1 DESCRIPTION
 

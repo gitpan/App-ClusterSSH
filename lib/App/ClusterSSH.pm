@@ -3,12 +3,17 @@ package App::ClusterSSH;
 use 5.008.004;
 use warnings;
 use strict;
-use version; our $VERSION = version->new('4.00_11');
+use version; our $VERSION = version->new('4.01_00');
 
 use Carp;
 
 use base qw/ App::ClusterSSH::Base /;
 use App::ClusterSSH::Host;
+use App::ClusterSSH::Config;
+use App::ClusterSSH::Helper;
+use App::ClusterSSH::Cluster;
+
+use FindBin qw($Script);
 
 use POSIX ":sys_wait_h";
 use Pod::Usage;
@@ -50,10 +55,29 @@ sub new {
 
     my $self = $class->SUPER::new(%args);
 
+    $self->{config}  = App::ClusterSSH::Config->new();
+    $self->{helper}  = App::ClusterSSH::Helper->new();
+    $self->{cluster} = App::ClusterSSH::Cluster->new();
+
     # catch and reap any zombies
     $SIG{CHLD} = \&REAPER;
 
     return $self;
+}
+
+sub config {
+    my ($self) = @_;
+    return $self->{config};
+}
+
+sub cluster {
+    my ($self) = @_;
+    return $self->{cluster};
+}
+
+sub helper {
+    my ($self) = @_;
+    return $self->{helper};
 }
 
 sub REAPER {
@@ -84,6 +108,7 @@ my @options_spec = (
     'port|p=i',
     'autoquit|q',
     'no-autoquit|Q',
+    'autoclose|K=i',
     'history|s',
     'term-args|t=s',
     'title|T=s',
@@ -93,13 +118,10 @@ my @options_spec = (
     'use_all_a_records|A',
 );
 my %options;
-my %config;
-my %clusters;    # hash for resolving cluster names
 my %windows;     # hash for all window definitions
 my %menus;       # hash for all menu definitions
 my @servers;     # array of servers provided on cmdline
 my %servers;     # hash of server cx info
-my $helper_script = "";
 my $xdisplay;
 my %keyboardmap;
 my $sysconfigdir = "/etc";
@@ -172,9 +194,7 @@ sub exit_prog() {
 sub logmsg($@) {
     my $level = shift;
 
-    if ( $level > 6 ) {
-        croak('requested debug level should not be above 6');
-    }
+    $level = 6 if ( $level > 6 );
 
     if ( $level <= $options{debug} ) {
         print( strftime( "%H:%M:%S: ", localtime ) )
@@ -183,292 +203,8 @@ sub logmsg($@) {
     }
 }
 
-# set some application defaults
-sub load_config_defaults() {
-    $config{terminal}           = "xterm";
-    $config{terminal_args}      = "";
-    $config{terminal_title_opt} = "-T";
-    $config{terminal_colorize}  = 1;
-    $config{terminal_bg_style}  = 'dark';
-    $config{terminal_allow_send_events}
-        = "-xrm '*.VT100.allowSendEvents:true'";
-    $config{terminal_font}           = "6x13";
-    $config{terminal_size}           = "80x24";
-    $config{use_hotkeys}             = "yes";
-    $config{key_quit}                = "Control-q";
-    $config{key_addhost}             = "Control-Shift-plus";
-    $config{key_clientname}          = "Alt-n";
-    $config{key_history}             = "Alt-h";
-    $config{key_retilehosts}         = "Alt-r";
-    $config{key_paste}               = "Control-v";
-    $config{mouse_paste}             = "Button-2";
-    $config{auto_quit}               = "yes";
-    $config{window_tiling}           = "yes";
-    $config{window_tiling_direction} = "right";
-    $config{console_position}        = "";
-
-    $config{screen_reserve_top}    = 0;
-    $config{screen_reserve_bottom} = 60;
-    $config{screen_reserve_left}   = 0;
-    $config{screen_reserve_right}  = 0;
-
-    $config{terminal_reserve_top}    = 5;
-    $config{terminal_reserve_bottom} = 0;
-    $config{terminal_reserve_left}   = 5;
-    $config{terminal_reserve_right}  = 0;
-
-    $config{terminal_decoration_height} = 10;
-    $config{terminal_decoration_width}  = 8;
-
-    ( $config{comms} = basename($0) ) =~ s/^.//;
-    $config{comms} =~ s/.pl$//;    # for when testing directly out of cvs
-    $config{method} = $config{comms};
-
-    $config{title} = "C" . uc( $config{comms} );
-
-    $config{comms} = "telnet" if ( $config{comms} eq "tel" );
-
-    $config{comms} = "console" if ( $config{comms} eq "con" );
-
-    $config{ $config{comms} } = $config{comms};
-
-    $config{ssh_args} = " -x -o ConnectTimeout=10"
-        if ( $config{ $config{comms} } =~ /ssh$/ );
-    $config{rsh_args} = "";
-
-    $config{telnet_args} = "";
-
-    $config{console_args} = "";
-
-    $config{extra_cluster_file} = "";
-
-    $config{unmap_on_redraw} = "no";    # Debian #329440
-
-    $config{show_history}   = 0;
-    $config{history_width}  = 40;
-    $config{history_height} = 10;
-
-    $config{command}             = q{};
-    $config{max_host_menu_items} = 30;
-
-    $config{max_addhost_menu_cluster_items} = 6;
-    $config{menu_send_autotearoff}          = 0;
-    $config{menu_host_autotearoff}          = 0;
-
-    $config{send_menu_xml_file} = $ENV{HOME} . '/.csshrc_send_menu';
-
-    $config{use_all_a_records} = 0;
-}
-
-# load in config file settings
-sub parse_config_file($) {
-    my $config_file = shift;
-    logmsg( 2, "Reading in from config file $config_file" );
-    return if ( !-e $config_file || !-r $config_file );
-
-    open( CFG, $config_file ) or die("Couldnt open $config_file: $!");
-    my $l;
-    while ( defined( $l = <CFG> ) ) {
-        next
-            if ( $l =~ /^\s*$/ || $l =~ /^#/ )
-            ;    # ignore blank lines & commented lines
-        $l =~ s/#.*//;     # remove comments from remaining lines
-        $l =~ s/\s*$//;    # remove trailing whitespace
-
-        # look for continuation lines
-        chomp $l;
-        if ( $l =~ s/\\\s*$// ) {
-            $l .= <CFG>;
-            redo unless eof(CFG);
-        }
-
-        next unless $l =~ m/\s*(\S+)\s*=\s*(.*)\s*/;
-        my ( $key, $value ) = ( $1, $2 );
-        if ( defined $key && defined $value ) {
-            $config{$key} = $value;
-            logmsg( 3, "$key=$value" );
-        }
-    }
-    close(CFG);
-
-    # tidy up entries, just in case
-    $config{terminal_font} =~ s/['"]//g;
-}
-
-sub find_binary($) {
-    my $binary = shift;
-
-    logmsg( 2, "Looking for $binary" );
-    my $path;
-    if ( !-x $binary || substr( $binary, 0, 1 ) ne '/' ) {
-
-       # search the users $PATH and then a few other places to find the binary
-       # just in case $PATH isnt set up right
-        foreach (
-            split( /:/, $ENV{PATH} ), qw!
-            /bin
-            /sbin
-            /usr/sbin
-            /usr/bin
-            /usr/local/bin
-            /usr/local/sbin
-            /opt/local/bin
-            /opt/local/sbin
-            !
-            )
-        {
-            logmsg( 3, "Looking in $_" );
-
-            if ( -f $_ . '/' . $binary && -x $_ . '/' . $binary ) {
-                $path = $_ . '/' . $binary;
-                logmsg( 2, "Found at $path" );
-                last;
-            }
-        }
-    }
-    else {
-        logmsg( 2, "Already configured OK" );
-        $path = $binary;
-    }
-    if ( !$path || !-f $path || !-x $path ) {
-        warn(
-            "Terminal binary not found ($binary) - please amend \$PATH or the cssh config file\n"
-        );
-        die unless ( $options{'output-config'} );
-    }
-
-    chomp($path);
-    return $path;
-}
-
-# make sure our config is sane (i.e. binaries found) and get some extra bits
-sub check_config() {
-
-    # check we have xterm on our path
-    logmsg( 2, "Checking path to xterm" );
-    $config{terminal} = find_binary( $config{terminal} );
-
-    # check we have comms method on our path
-    logmsg( 2, "Checking path to $config{comms}" );
-    $config{ $config{comms} } = find_binary( $config{ $config{comms} } );
-
-    # make sure comms in an accepted value
-    die
-        "FATAL: Only ssh, rsh, telnet, and console/conserver protocols are currently supported (comms=$config{comms})\n"
-        if ( $config{comms} !~ /^(:?[rs]sh|telnet|console)$/ );
-
-    # Set any extra config options given on command line
-    $config{title} = $options{title} if ( $options{title} );
-
-    $config{auto_quit} = "yes" if $options{autoquit};
-    $config{auto_quit} = "no"  if $options{'no-autoquit'};
-
-    # backwards compatibility & tidyup
-    if ( $config{always_tile} ) {
-        if ( !$config{window_tiling} ) {
-            if ( $config{always_tile} eq "never" ) {
-                $config{window_tiling} = "no";
-            }
-            else {
-                $config{window_tiling} = "yes";
-            }
-        }
-        delete( $config{always_tile} );
-    }
-    $config{window_tiling} = "yes" if $options{tile};
-    $config{window_tiling} = "no"  if $options{'no-tile'};
-
-    $config{user} = $options{username} if ( $options{username} );
-    $config{port} = $options{port}     if ( $options{port} );
-
-    $config{mstr} = $options{master} if ( $options{master} );
-
-    $config{terminal_args} = $options{'term-args'}
-        if ( $options{'term-args'} );
-
-    if ( $config{terminal_args} =~ /-class (\w+)/ ) {
-        $config{terminal_allow_send_events}
-            = "-xrm '$1.VT100.allowSendEvents:true'";
-    }
-
-    $config{internal_previous_state} = "";    # set to default
-
-    # option font overrides config file font setting
-    $config{terminal_font} = $options{font} if ( $options{font} );
-    get_font_size();
-
-    $config{extra_cluster_file} =~ s/\s+//g;
-
-    $config{ssh_args} = $options{options} if ( $options{options} );
-
-    $config{show_history} = 1 if $options{'show-history'};
-
-    $config{command} = $options{action} if ( $options{action} );
-
-    if ( $options{use_all_a_records} ) {
-        $config{use_all_a_records} = !$config{use_all_a_records} || 0;
-    }
-}
-
-sub load_configfile() {
-    parse_config_file( $sysconfigdir . '/csshrc' );
-    parse_config_file( $ENV{HOME} . '/.csshrc' );
-    if ( $options{'config-file'} ) {
-        parse_config_file( $options{'config-file'} );
-    }
-    check_config();
-}
-
-# dump out the config to STDOUT
-sub dump_config {
-    my $noexit = shift;
-
-    logmsg( 3, "Dumping config to STDOUT" );
-
-    print("# Configuration dump produced by 'cssh -u'\n");
-
-    foreach ( sort( keys(%config) ) ) {
-        next
-            if ( $_ =~ /^internal/ && $options{debug} == 0 )
-            ;    # do not output internal vars
-        print "$_=$config{$_}\n";
-    }
-    exit_prog if ( !$noexit );
-}
-
-sub list_tags {
-    print( 'Available cluster tags:', $/ );
-    print "\t", $_, $/ foreach ( sort( keys(%clusters) ) );
-    exit_prog;
-}
-
-sub check_ssh_hostnames {
-    return unless ( $config{method} eq "ssh" );
-
-    my $ssh_config = "$ENV{HOME}/.ssh/config";
-
-    if ( -r $ssh_config && open( SSHCFG, "<", $ssh_config ) ) {
-        while (<SSHCFG>) {
-            next unless (m/^\s*host\s+([\w\.-]+)/i);
-
-            # account for multiple declarations of hosts
-            $ssh_hostnames{$_} = 1 foreach ( split( /\s+/, $1 ) );
-        }
-        close(SSHCFG);
-    }
-
-    if ( $options{debug} > 1 ) {
-        if (%ssh_hostnames) {
-            logmsg( 2, "Parsed these ssh config hosts:" );
-            logmsg( 2, "- $_" ) foreach ( sort( keys(%ssh_hostnames) ) );
-        }
-        else {
-            logmsg( 2, "No hostnames parsed from user ssh config file" );
-        }
-    }
-}
-
 sub evaluate_commands {
+    my ($self) = @_;
     my ( $return, $user, $port, $host );
 
     # break apart the given host string to check for user or port configs
@@ -478,7 +214,7 @@ sub evaluate_commands {
     $host = $options{evaluate};
 
     $user = $user ? "-l $user" : "";
-    if ( $config{comms} eq "telnet" ) {
+    if ( $self->config->{comms} eq "telnet" ) {
         $port = $port ? " $port" : "";
     }
     else {
@@ -487,27 +223,39 @@ sub evaluate_commands {
 
     print STDERR "Testing terminal - running command:\n";
 
-    my $terminal_command
-        = "$config{terminal} $config{terminal_allow_send_events} -e \"$^X\" \"-e\" 'print \"Working\\n\" ; sleep 5'";
+    my $command = "$^X -e 'print \"Base terminal test\n\"; sleep 2'";
 
-    print STDERR $terminal_command, $/;
+    my $terminal_command = join( ' ',
+        $self->config->{terminal},
+        $self->config->{terminal_allow_send_events}, "-e " );
 
-    system($terminal_command);
+    my $run_command = "$terminal_command $command";
+
+    print STDERR $run_command, $/;
+
+    system($run_command);
     print STDERR "\nTesting comms - running command:\n";
 
-    my $comms_command = $config{ $config{comms} } . " "
-        . $config{ $config{comms} . "_args" };
+    my $comms_command = join( ' ',
+        $self->config->{ $self->config->{comms} },
+        $self->config->{ $self->config->{comms} . "_args" } );
 
-    if ( $config{comms} eq "telnet" ) {
+    if ( $self->config->{comms} eq "telnet" ) {
         $comms_command .= " $host $port";
     }
     else {
-        $comms_command .= " $user $port $host echo Working";
+        $comms_command
+            .= " $user $port $host hostname ; echo Got hostname via ssh; sleep 2";
     }
 
     print STDERR $comms_command, $/;
 
     system($comms_command);
+
+    $run_command = "$terminal_command '$comms_command'";
+    print STDERR $run_command, $/;
+
+    system($run_command);
 
     exit_prog;
 }
@@ -615,108 +363,9 @@ SWITCH: for ($state) {
     return ( $state, $code );
 }
 
-# read in all cluster definitions
-sub get_clusters() {
-
-    # first, read in global file
-    my $cluster_file = '/etc/clusters';
-
-    logmsg( 3, "Logging for $cluster_file" );
-
-    if ( -f $cluster_file ) {
-        logmsg( 2, "Loading clusters in from $cluster_file" );
-        open( CLUSTERS, $cluster_file ) || die("Couldnt read $cluster_file");
-        my $l;
-        while ( defined( $l = <CLUSTERS> ) ) {
-            next
-                if ( $l =~ /^\s*$/ || $l =~ /^#/ )
-                ;    # ignore blank lines & commented lines
-            chomp $l;
-            if ( $l =~ s/\\\s*$// ) {
-                $l .= <CLUSTER>;
-                redo unless eof(CLUSTERS);
-            }
-            my @line = split( /\s/, $l );
-
-        #s/^([\w-]+)\s*//;               # remote first word and stick into $1
-
-            logmsg(
-                3,
-                "cluster $line[0] = ",
-                join( " ", @line[ 1 .. $#line ] )
-            );
-            $clusters{ $line[0] } = join( " ", @line[ 1 .. $#line ] )
-                ;    # Now bung in rest of line
-        }
-        close(CLUSTERS);
-    }
-
-    # Now get any definitions out of %config
-    logmsg( 2, "Looking for csshrc" );
-    if ( $config{clusters} ) {
-        logmsg( 2, "Loading clusters in from csshrc" );
-
-        foreach ( split( /\s+/, $config{clusters} ) ) {
-            if ( !$config{$_} ) {
-                warn(
-                    "WARNING: missing cluster definition in .csshrc file ($_)"
-                );
-            }
-            else {
-                logmsg( 3, "cluster $_ = $config{$_}" );
-                $clusters{$_} = $config{$_};
-            }
-        }
-    }
-
-    # and any clusters defined within the config file or on the command line
-    if ( $config{extra_cluster_file} || $options{'cluster-file'} ) {
-
-        # check for multiple entries and push it through glob to catch ~'s
-        foreach my $item ( split( /,/, $config{extra_cluster_file} ),
-            $options{'cluster-file'} )
-        {
-            next unless ($item);
-
-            # cater for people using '$HOME'
-            $item =~ s/\$HOME/$ENV{HOME}/;
-            foreach my $file ( glob($item) ) {
-                if ( !-r $file ) {
-                    warn("Unable to read cluster file '$file': $!\n");
-                    next;
-                }
-                logmsg( 2, "Loading clusters in from '$file'" );
-
-                open( CLUSTERS, $file ) || die("Couldnt read '$file': $!\n");
-                my $l;
-                while ( defined( $l = <CLUSTERS> ) ) {
-                    next if ( $l =~ /^\s*$/ || $l =~ /^#/ );
-                    chomp $l;
-                    if ( $l =~ s/\\\s*$// ) {
-                        $l .= <CLUSTER>;
-                        redo unless eof(CLUSTERS);
-                    }
-
-                    my @line = split( /\s/, $l );
-                    logmsg(
-                        3,
-                        "cluster $line[0] = ",
-                        join( " ", @line[ 1 .. $#line ] )
-                    );
-                    $clusters{ $line[0] } = join( " ", @line[ 1 .. $#line ] )
-                        ;    # Now bung in rest of line
-                }
-            }
-
-        }
-    }
-
-    logmsg( 2, "Finished loading clusters" );
-}
-
 sub resolve_names(@) {
+    my ( $self, @servers ) = @_;
     logmsg( 2, 'Resolving cluster names: started' );
-    my @servers = @_;
 
     foreach (@servers) {
         my $dirty    = $_;
@@ -726,25 +375,25 @@ sub resolve_names(@) {
         if ( $dirty =~ s/^(.*)@// ) {
             $username = $1;
         }
-        if (   $config{use_all_a_records}
+        if (   $self->config->{use_all_a_records}
             && $dirty !~ m/^(\d{1,3}\.?){4}$/
-            && !defined( $clusters{$dirty} ) )
+            && !defined( $self->cluster->get_tag($dirty) ) )
         {
             my $hostobj = gethostbyname($dirty);
             if ( defined($hostobj) ) {
                 my @alladdrs = map { inet_ntoa($_) } @{ $hostobj->addr_list };
                 if ( $#alladdrs > 0 ) {
-                    $clusters{$dirty} = join ' ', @alladdrs;
-                    logmsg( 3, 'Expanded to ', $clusters{$dirty} );
+                    $self->cluster->register_tag($dirty, @alladdrs);
+                    logmsg( 3, 'Expanded to ', $self->cluster->get_tag($dirty) );
                 }
                 else {
                     logmsg( 3, 'Only one A record' );
                 }
             }
         }
-        if ( $clusters{$dirty} ) {
+        if ( $self->cluster->get_tag($dirty) ) {
             logmsg( 3, '... it is a cluster' );
-            foreach my $node ( split( / /, $clusters{$dirty} ) ) {
+            foreach my $node ( $self->cluster->get_tag($dirty) ) {
                 if ($username) {
                     $node =~ s/^(.*)@//;
                     $node = $username . '@' . $node;
@@ -764,28 +413,30 @@ sub resolve_names(@) {
 }
 
 sub change_main_window_title() {
+    my ($self) = @_;
     my $number = keys(%servers);
-    $windows{main_window}->title( $config{title} . " [$number]" );
+    $windows{main_window}->title( $self->config->{title} . " [$number]" );
 }
 
 sub show_history() {
-    if ( $config{show_history} ) {
+    my ($self) = @_;
+    if ( $self->config->{show_history} ) {
         $windows{history}->packForget();
-        $config{show_history} = 0;
+        $self->config->{show_history} = 0;
     }
     else {
         $windows{history}->pack(
             -fill   => "x",
             -expand => 1,
         );
-        $config{show_history} = 1;
+        $self->config->{show_history} = 1;
     }
 }
 
 sub update_display_text($) {
-    my $char = shift;
+    my ( $self, $char ) = @_;
 
-    return if ( !$config{show_history} );
+    return if ( !$self->config->{show_history} );
 
     logmsg( 2, "Dropping :$char: into display" );
 
@@ -818,6 +469,7 @@ SWITCH: {
             };
         }
     }
+    return $self;
 }
 
 sub send_text($@) {
@@ -928,69 +580,19 @@ sub send_resizemove($$$$$) {
     #$xdisplay->flush(); # dont flush here, but after all tiling worked out
 }
 
-sub setup_helper_script() {
-    logmsg( 2, "Setting up helper script" );
-    $helper_script = <<"	HERE";
-		my \$pipe=shift;
-		my \$svr=shift;
-		my \$user=shift;
-		my \$port=shift;
-		my \$mstr=shift;
-		my \$command="$config{$config{comms}} $config{$config{comms}."_args"} ";
-		open(PIPE, ">", \$pipe) or die("Failed to open pipe: \$!\\n");
-		print PIPE "\$\$:\$ENV{WINDOWID}" 
-			or die("Failed to write to pipe: $!\\n");
-		close(PIPE) or die("Failed to close pipe: $!\\n");
-		if(\$svr =~ m/==\$/)
-		{
-			\$svr =~ s/==\$//;
-			warn("\\nWARNING: failed to resolve IP address for \$svr.\\n\\n"
-			);
-			sleep 5;
-		}
-		if(\$mstr) {
-			unless("$config{comms}" ne "console") {
-				\$mstr = \$mstr ? "-M \$mstr " : "";
-				\$command .= \$mstr;
-			}
-		}
-		if(\$user) {
-			unless("$config{comms}" eq "telnet") {
-				\$user = \$user ? "-l \$user " : "";
-				\$command .= \$user;
-			}
-		}
-		if("$config{comms}" eq "telnet") {
-			\$command .= "\$svr \$port";
-		} else {
-			if (\$port) {
-				\$command .= "-p \$port \$svr";
-			} else {
-			  \$command .= "\$svr";
-			}
-		}
-		\$command .= " $config{command} || sleep 5";
-#		warn("Running:\$command\\n"); # for debug purposes
-		exec(\$command);
-	HERE
-
-    #	eval $helper_script || die ($@); # for debug purposes
-    logmsg( 2, $helper_script );
-    logmsg( 2, "Helper script done" );
-}
-
 sub open_client_windows(@) {
+    my $self = shift;
     foreach (@_) {
         next unless ($_);
 
         my $server_object = App::ClusterSSH::Host->parse_host_string($_);
 
         my $username = $server_object->get_username();
-        $username    = $config{user} if ( $config{user} );
-        my $port     = $server_object->get_port();
-        $port        = $config{port} if ( $config{port} );
-        my $server   = $server_object->get_hostname();
-        my $master   = $server_object->get_master();
+        $username = $self->config->{user} if ( $self->config->{user} );
+        my $port = $server_object->get_port();
+        $port = $self->config->{port} if ( $self->config->{port} );
+        my $server = $server_object->get_hostname();
+        my $master = $server_object->get_master();
 
         my $given_server_name = $server_object->get_givenname();
 
@@ -1012,9 +614,9 @@ sub open_client_windows(@) {
         logmsg( 3, "username=$username, server=$server, port=$port" );
 
         my $color = '';
-        if ( $config{terminal_colorize} ) {
+        if ( $self->config->{terminal_colorize} ) {
             my $c = pick_color($server);
-            if ( $config{terminal_bg_style} eq 'dark' ) {
+            if ( $self->config->{terminal_bg_style} eq 'dark' ) {
                 $color = "-bg \\#000000 -fg $c";
             }
             else {
@@ -1031,11 +633,11 @@ sub open_client_windows(@) {
         $servers{$server}{connect_string} = $_;
         $servers{$server}{givenname}      = $given_server_name;
         $servers{$server}{realname}       = $realname;
-        $servers{$server}{username}       = $config{user};
+        $servers{$server}{username}       = $self->config->{user};
         $servers{$server}{username}       = $username if ($username);
         $servers{$server}{username}       = $username || '';
         $servers{$server}{port}           = $port || '';
-        $servers{$server}{master}         = $config{mstr} || '';;
+        $servers{$server}{master}         = $self->config->{mstr} || '';
         $servers{$server}{master}         = $master if ($master);
 
         logmsg( 2, "Working on server $server for $_" );
@@ -1059,8 +661,24 @@ sub open_client_windows(@) {
           # Since this is the child, we can mark any server unresolved without
           # affecting the main program
             $servers{$server}{realname} .= "==" if ( !$realname );
-            my $exec
-                = "$config{terminal} $color $config{terminal_args} $config{terminal_allow_send_events} $config{terminal_title_opt} '$config{title}: $servers{$server}{connect_string}' -font $config{terminal_font} -e \"$^X\" \"-e\" '$helper_script' '$servers{$server}{pipenm}' '$servers{$server}{givenname}' '$servers{$server}{username}' '$servers{$server}{port}' '$servers{$server}{master}'";
+            my $exec = join( ' ',
+                $self->config->{terminal},
+                $color,
+                $self->config->{terminal_args},
+                $self->config->{terminal_allow_send_events},
+                $self->config->{terminal_title_opt},
+                "'"
+                    . $self->config->{title} . ': '
+                    . $servers{$server}{connect_string} . "'",
+                '-font ' . $self->config->{terminal_font},
+                "-e " . $^X . ' -e ',
+                "'" . $self->helper->script( $self->config ) . "'",
+                " " . $servers{$server}{pipenm},
+                " " . $servers{$server}{givenname},
+                " '" . $servers{$server}{username} . "'",
+                " '" . $servers{$server}{port} . "'",
+                " '" . $servers{$server}{master} . "'",
+            );
             logmsg( 2, "Terminal exec line:\n$exec\n" );
             exec($exec) == 0 or warn("Failed: $!");
         }
@@ -1108,49 +726,59 @@ sub open_client_windows(@) {
         delete( $servers{$server}{pipenm} );
 
         $servers{$server}{active} = 1;    # mark as active
-        $config{internal_activate_autoquit}
+        $self->config->{internal_activate_autoquit}
             = 1;                          # activate auto_quit if in use
     }
     logmsg( 2, "All client windows opened" );
-    $config{internal_total} = int( keys(%servers) );
+    $self->config->{internal_total} = int( keys(%servers) );
+
+    return $self;
 }
 
 sub get_font_size() {
+    my ($self) = @_;
     logmsg( 2, "Fetching font size" );
 
     # get atom name<->number relations
     my $quad_width = $xdisplay->atom("QUAD_WIDTH");
     my $pixel_size = $xdisplay->atom("PIXEL_SIZE");
 
-    my $font = $xdisplay->new_rsrc;
-    $xdisplay->OpenFont( $font, $config{terminal_font} );
+    my $font          = $xdisplay->new_rsrc;
+    my $terminal_font = $self->config->{terminal_font};
+    $xdisplay->OpenFont( $font, $terminal_font );
 
     my %font_info;
 
     eval { (%font_info) = $xdisplay->QueryFont($font); }
-        || die( "Fatal: Unrecognised font used ($config{terminal_font}).\n"
+        || die( "Fatal: Unrecognised font used ($terminal_font).\n"
             . "Please amend \$HOME/.csshrc with a valid font (see man page).\n"
         );
 
-    $config{internal_font_width}  = $font_info{properties}{$quad_width};
-    $config{internal_font_height} = $font_info{properties}{$pixel_size};
+    $self->config->{internal_font_width}
+        = $font_info{properties}{$quad_width};
+    $self->config->{internal_font_height}
+        = $font_info{properties}{$pixel_size};
 
-    if ( !$config{internal_font_width} || !$config{internal_font_height} ) {
-        die(      "Fatal: Unrecognised font used ($config{terminal_font}).\n"
+    if (   !$self->config->{internal_font_width}
+        || !$self->config->{internal_font_height} )
+    {
+        die(      "Fatal: Unrecognised font used ($terminal_font).\n"
                 . "Please amend \$HOME/.csshrc with a valid font (see man page).\n"
         );
     }
 
     logmsg( 2, "Done with font size" );
+    return $self;
 }
 
 sub show_console() {
+    my ($self) = shift;
     logmsg( 2, "Sending console to front" );
 
-    $config{internal_previous_state} = "mid-change";
+    $self->config->{internal_previous_state} = "mid-change";
 
     # fudge the counter to drop a redraw event;
-    $config{internal_map_count} -= 4;
+    $self->config->{internal_map_count} -= 4;
 
     $xdisplay->flush();
     $windows{main_window}->update();
@@ -1161,11 +789,11 @@ sub show_console() {
     # Sleep for a moment to give WM time to bring console back
     select( undef, undef, undef, 0.5 );
 
-    if ( $config{menu_send_autotearoff} ) {
+    if ( $self->config->{menu_send_autotearoff} ) {
         $menus{send}->menu->tearOffMenu()->raise;
     }
 
-    if ( $config{menu_host_autotearoff} ) {
+    if ( $self->config->{menu_host_autotearoff} ) {
         $menus{hosts}->menu->tearOffMenu()->raise;
     }
 
@@ -1174,18 +802,23 @@ sub show_console() {
     $windows{main_window}->focus( -force );
     $windows{text_entry}->focus( -force );
 
-    $config{internal_previous_state} = "normal";
+    $self->config->{internal_previous_state} = "normal";
 
     # fvwm seems to need this (Debian #329440)
     $windows{main_window}->MapWindow;
+
+    return $self;
 }
 
 # leave function def open here so we can be flexible in how it called
 sub retile_hosts {
-    my $force = shift || "";
+    my ( $self, $force ) = @_;
+    $force ||= "";
     logmsg( 2, "Retiling windows" );
 
-    if ( $config{window_tiling} ne "yes" && !$force ) {
+    my %config;
+
+    if ( $self->config->{window_tiling} ne "yes" && !$force ) {
         logmsg( 3,
             "Not meant to be tiling; just reshow windows as they were" );
 
@@ -1193,95 +826,99 @@ sub retile_hosts {
             $xdisplay->req( 'MapWindow', $servers{$server}{wid} );
         }
         $xdisplay->flush();
-        show_console();
+        $self->show_console();
         return;
     }
 
     # ALL SIZES SHOULD BE IN PIXELS for consistency
 
-    logmsg( 2, "Count is currently $config{internal_total}" );
+    logmsg( 2, "Count is currently ", $self->config->{internal_total} );
 
-    if ( $config{internal_total} == 0 ) {
+    if ( $self->config->{internal_total} == 0 ) {
 
-        # If nothing to tile, done bother doing anything, just show console
-        show_console();
-        return;
+        # If nothing to tile, don't bother doing anything, just show console
+        return $self->show_console();
     }
 
     # work out terminal pixel size from terminal size & font size
     # does not include any title bars or scroll bars - purely text area
-    $config{internal_terminal_cols}
-        = ( $config{terminal_size} =~ /(\d+)x.*/ )[0];
-    $config{internal_terminal_width}
-        = ( $config{internal_terminal_cols} * $config{internal_font_width} )
-        + $config{terminal_decoration_width};
+    $self->config->{internal_terminal_cols}
+        = ( $self->config->{terminal_size} =~ /(\d+)x.*/ )[0];
+    $self->config->{internal_terminal_width}
+        = (   $self->config->{internal_terminal_cols}
+            * $self->config->{internal_font_width} )
+        + $self->config->{terminal_decoration_width};
 
-    $config{internal_terminal_rows}
-        = ( $config{terminal_size} =~ /.*x(\d+)/ )[0];
-    $config{internal_terminal_height}
-        = ( $config{internal_terminal_rows} * $config{internal_font_height} )
-        + $config{terminal_decoration_height};
+    $self->config->{internal_terminal_rows}
+        = ( $self->config->{terminal_size} =~ /.*x(\d+)/ )[0];
+    $self->config->{internal_terminal_height}
+        = (   $self->config->{internal_terminal_rows}
+            * $self->config->{internal_font_height} )
+        + $self->config->{terminal_decoration_height};
 
     # fetch screen size
-    $config{internal_screen_height} = $xdisplay->{height_in_pixels};
-    $config{internal_screen_width}  = $xdisplay->{width_in_pixels};
+    $self->config->{internal_screen_height} = $xdisplay->{height_in_pixels};
+    $self->config->{internal_screen_width}  = $xdisplay->{width_in_pixels};
 
     # Now, work out how many columns of terminals we can fit on screen
-    $config{internal_columns} = int(
-        (         $config{internal_screen_width} 
-                - $config{screen_reserve_left}
-                - $config{screen_reserve_right}
+    $self->config->{internal_columns} = int(
+        (         $self->config->{internal_screen_width}
+                - $self->config->{screen_reserve_left}
+                - $self->config->{screen_reserve_right}
         ) / (
-            $config{internal_terminal_width} 
-                + $config{terminal_reserve_left}
-                + $config{terminal_reserve_right}
+            $self->config->{internal_terminal_width}
+                + $self->config->{terminal_reserve_left}
+                + $self->config->{terminal_reserve_right}
         )
     );
 
     # Work out the number of rows we need to use to fit everything on screen
-    $config{internal_rows} = int(
-        ( $config{internal_total} / $config{internal_columns} ) + 0.999 );
+    $self->config->{internal_rows} = int(
+        (         $self->config->{internal_total}
+                / $self->config->{internal_columns}
+        ) + 0.999
+    );
 
-    logmsg( 2, "Screen Columns: ", $config{internal_columns} );
-    logmsg( 2, "Screen Rows: ",    $config{internal_rows} );
+    logmsg( 2, "Screen Columns: ", $self->config->{internal_columns} );
+    logmsg( 2, "Screen Rows: ",    $self->config->{internal_rows} );
 
     # Now adjust the height of the terminal to either the max given,
     # or to get everything on screen
     {
         my $height = int(
-            (   (         $config{internal_screen_height}
-                        - $config{screen_reserve_top}
-                        - $config{screen_reserve_bottom}
+            (   (         $self->config->{internal_screen_height}
+                        - $self->config->{screen_reserve_top}
+                        - $self->config->{screen_reserve_bottom}
                 ) - (
-                    $config{internal_rows} * (
-                              $config{terminal_reserve_top}
-                            + $config{terminal_reserve_bottom}
+                    $self->config->{internal_rows} * (
+                              $self->config->{terminal_reserve_top}
+                            + $self->config->{terminal_reserve_bottom}
                     )
                 )
-            ) / $config{internal_rows}
+            ) / $self->config->{internal_rows}
         );
 
         logmsg( 2, "Terminal height=$height" );
 
-        $config{internal_terminal_height} = (
-              $height > $config{internal_terminal_height}
-            ? $config{internal_terminal_height}
+        $self->config->{internal_terminal_height} = (
+              $height > $self->config->{internal_terminal_height}
+            ? $self->config->{internal_terminal_height}
             : $height
         );
     }
 
-    dump_config("noexit") if ( $options{debug} > 1 );
+    $self->config->dump("noexit") if ( $options{debug} > 1 );
 
     # now we have the info, plot first window position
     my @hosts;
     my ( $current_x, $current_y, $current_row, $current_col ) = 0;
-    if ( $config{window_tiling_direction} =~ /right/i ) {
+    if ( $self->config->{window_tiling_direction} =~ /right/i ) {
         logmsg( 2, "Tiling top left going bot right" );
-        @hosts = sort( keys(%servers) );
-        $current_x
-            = $config{screen_reserve_left} + $config{terminal_reserve_left};
-        $current_y
-            = $config{screen_reserve_top} + $config{terminal_reserve_top};
+        @hosts     = sort( keys(%servers) );
+        $current_x = $self->config->{screen_reserve_left}
+            + $self->config->{terminal_reserve_left};
+        $current_y = $self->config->{screen_reserve_top}
+            + $self->config->{terminal_reserve_top};
         $current_row = 0;
         $current_col = 0;
     }
@@ -1289,18 +926,18 @@ sub retile_hosts {
         logmsg( 2, "Tiling bot right going top left" );
         @hosts = reverse( sort( keys(%servers) ) );
         $current_x
-            = $config{screen_reserve_right} 
-            - $config{internal_screen_width}
-            - $config{terminal_reserve_right}
-            - $config{internal_terminal_width};
+            = $self->config->{screen_reserve_right}
+            - $self->config->{internal_screen_width}
+            - $self->config->{terminal_reserve_right}
+            - $self->config->{internal_terminal_width};
         $current_y
-            = $config{screen_reserve_bottom} 
-            - $config{internal_screen_height}
-            - $config{terminal_reserve_bottom}
-            - $config{internal_terminal_height};
+            = $self->config->{screen_reserve_bottom}
+            - $self->config->{internal_screen_height}
+            - $self->config->{terminal_reserve_bottom}
+            - $self->config->{internal_terminal_height};
 
-        $current_row = $config{internal_rows} - 1;
-        $current_col = $config{internal_columns} - 1;
+        $current_row = $self->config->{internal_rows} - 1;
+        $current_col = $self->config->{internal_columns} - 1;
     }
 
     # Unmap windows (hide them)
@@ -1313,37 +950,38 @@ sub retile_hosts {
         # sf tracker 3061999
         # $xdisplay->req( 'UnmapWindow', $servers{$server}{wid} );
 
-        if ( $config{unmap_on_redraw} =~ /yes/i ) {
+        if ( $self->config->{unmap_on_redraw} =~ /yes/i ) {
             $xdisplay->req( 'UnmapWindow', $servers{$server}{wid} );
         }
 
         logmsg( 2, "Moving $server window" );
         send_resizemove(
             $servers{$server}{wid},
-            $current_x, $current_y,
-            $config{internal_terminal_width},
-            $config{internal_terminal_height}
+            $current_x,
+            $current_y,
+            $self->config->{internal_terminal_width},
+            $self->config->{internal_terminal_height}
         );
 
         $xdisplay->flush();
         select( undef, undef, undef, 0.1 );    # sleep for a moment for the WM
 
-        if ( $config{window_tiling_direction} =~ /right/i ) {
+        if ( $self->config->{window_tiling_direction} =~ /right/i ) {
 
             # starting top left, and move right and down
             $current_x
-                += $config{terminal_reserve_left}
-                + $config{terminal_reserve_right}
-                + $config{internal_terminal_width};
+                += $self->config->{terminal_reserve_left}
+                + $self->config->{terminal_reserve_right}
+                + $self->config->{internal_terminal_width};
 
             $current_col += 1;
-            if ( $current_col == $config{internal_columns} ) {
+            if ( $current_col == $self->config->{internal_columns} ) {
                 $current_y
-                    += $config{terminal_reserve_top}
-                    + $config{terminal_reserve_bottom}
-                    + $config{internal_terminal_height};
-                $current_x = $config{screen_reserve_left}
-                    + $config{terminal_reserve_left};
+                    += $self->config->{terminal_reserve_top}
+                    + $self->config->{terminal_reserve_bottom}
+                    + $self->config->{internal_terminal_height};
+                $current_x = $self->config->{screen_reserve_left}
+                    + $self->config->{terminal_reserve_left};
                 $current_row++;
                 $current_col = 0;
             }
@@ -1355,13 +993,13 @@ sub retile_hosts {
             $current_col -= 1;
             if ( $current_col < 0 ) {
                 $current_row--;
-                $current_col = $config{internal_columns};
+                $current_col = $self->config->{internal_columns};
             }
         }
     }
 
     # Now remap in right order to get overlaps correct
-    if ( $config{window_tiling_direction} =~ /right/i ) {
+    if ( $self->config->{window_tiling_direction} =~ /right/i ) {
         foreach my $server ( reverse(@hosts) ) {
             logmsg( 2, "Setting focus on $server" );
             $xdisplay->req( 'MapWindow', $servers{$server}{wid} );
@@ -1383,7 +1021,7 @@ sub retile_hosts {
     }
 
     # and as a last item, set focus back onto the console
-    show_console();
+    return $self->show_console();
 }
 
 sub capture_terminal() {
@@ -1458,6 +1096,7 @@ sub capture_terminal() {
 }
 
 sub toggle_active_state() {
+    my ($self) = @_;
     logmsg( 2, "Toggling active state of all hosts" );
 
     foreach my $svr ( sort( keys(%servers) ) ) {
@@ -1466,15 +1105,17 @@ sub toggle_active_state() {
 }
 
 sub close_inactive_sessions() {
+    my ($self) = @_;
     logmsg( 2, "Closing all inactive sessions" );
 
     foreach my $svr ( sort( keys(%servers) ) ) {
         terminate_host($svr) if ( !$servers{$svr}{active} );
     }
-    build_hosts_menu();
+    $self->build_hosts_menu();
 }
 
 sub add_host_by_name() {
+    my ($self) = @_;
     logmsg( 2, "Adding host to menu here" );
 
     $windows{host_entry}->focus();
@@ -1487,29 +1128,32 @@ sub add_host_by_name() {
 
     if ( $menus{host_entry} ) {
         logmsg( 2, "host=", $menus{host_entry} );
-        open_client_windows(
-            resolve_names( split( /\s+/, $menus{host_entry} ) ) );
+        my @names
+            = $self->resolve_names( split( /\s+/, $menus{host_entry} ) );
+        logmsg( 0, 'Opening to: ', join( ' ', @names ) );
+        $self->open_client_windows(@names);
     }
 
     if ( $menus{listbox}->curselection() ) {
         my @hosts = $menus{listbox}->get( $menus{listbox}->curselection() );
         logmsg( 2, "host=", join( ' ', @hosts ) );
-        open_client_windows( resolve_names(@hosts) );
+        $self->open_client_windows( $self->resolve_names(@hosts) );
     }
 
-    build_hosts_menu();
+    $self->build_hosts_menu();
     $menus{host_entry} = "";
 
     # retile, or bring console to front
-    if ( $config{window_tiling} eq "yes" ) {
-        retile_hosts();
+    if ( $self->config->{window_tiling} eq "yes" ) {
+        return $self->retile_hosts();
     }
     else {
-        show_console();
+        return $self->show_console();
     }
 }
 
 sub build_hosts_menu() {
+    my ($self) = @_;
     logmsg( 2, "Building hosts menu" );
 
     # first, empty the hosts menu from the 4th entry on
@@ -1528,7 +1172,7 @@ sub build_hosts_menu() {
     foreach my $svr ( sort( keys(%servers) ) ) {
         logmsg( 3, "Checking $svr and restoring active value" );
         my $colbreak = 0;
-        if ( $menu_item_counter > $config{max_host_menu_items} ) {
+        if ( $menu_item_counter > $self->config->{max_host_menu_items} ) {
             $colbreak          = 1;
             $menu_item_counter = 1;
         }
@@ -1540,23 +1184,29 @@ sub build_hosts_menu() {
         $menu_item_counter++;
     }
     logmsg( 3, "Changing window title" );
-    change_main_window_title();
+    $self->change_main_window_title();
     logmsg( 2, "Done" );
 }
 
 sub setup_repeat() {
-    $config{internal_count} = 0;
+    my ($self) = @_;
+    $self->config->{internal_count} = 0;
 
     # if this is too fast then we end up with queued invocations
     # with no time to run anything else
     $windows{main_window}->repeat(
         500,
         sub {
-            $config{internal_count} = 0
-                if ( $config{internal_count} > 60000 );    # reset if too high
-            $config{internal_count}++;
+            $self->config->{internal_count} = 0
+                if ( $self->config->{internal_count} > 60000 )
+                ;    # reset if too high
+            $self->config->{internal_count}++;
             my $build_menu = 0;
-            logmsg( 5, "Running repeat (count=$config{internal_count})" );
+            logmsg(
+                5,
+                "Running repeat;count=",
+                $self->config->{internal_count}
+            );
 
      #logmsg( 3, "Number of servers in hash is: ", scalar( keys(%servers) ) );
 
@@ -1575,29 +1225,29 @@ sub setup_repeat() {
             }
 
             # get current number of clients
-            $config{internal_total} = int( keys(%servers) );
+            $self->config->{internal_total} = int( keys(%servers) );
 
             #logmsg( 3, "Number after tidy is: ", $config{internal_total} );
 
             # get current number of clients
-            $config{internal_total} = int( keys(%servers) );
+            $self->config->{internal_total} = int( keys(%servers) );
 
             #logmsg( 3, "Number after tidy is: ", $config{internal_total} );
 
             # If there are no hosts in the list and we are set to autoquit
-            if (   $config{internal_total} == 0
-                && $config{auto_quit} =~ /yes/i )
+            if (   $self->config->{internal_total} == 0
+                && $self->config->{auto_quit} =~ /yes/i )
             {
 
                 # and some clients were actually opened...
-                if ( $config{internal_activate_autoquit} ) {
+                if ( $self->config->{internal_activate_autoquit} ) {
                     logmsg( 2, "Autoquitting" );
                     exit_prog;
                 }
             }
 
             # rebuild host menu if something has changed
-            build_hosts_menu() if ($build_menu);
+            $self->build_hosts_menu() if ($build_menu);
 
             # clean out text area, anyhow
             $menus{entrytext} = "";
@@ -1606,36 +1256,22 @@ sub setup_repeat() {
         }
     );
     logmsg( 2, "Repeat setup" );
-}
 
-sub write_default_user_config() {
-    return if ( !$ENV{HOME} || -e "$ENV{HOME}/.csshrc" );
-
-    if ( open( CONFIG, ">", "$ENV{HOME}/.csshrc" ) ) {
-        foreach ( sort( keys(%config) ) ) {
-
-            # do not output internal vars
-            next if ( $_ =~ /^internal/ );
-            print CONFIG "$_=$config{$_}\n";
-        }
-        close(CONFIG);
-    }
-    else {
-        logmsg( 1, "Unable to write default $ENV{HOME}/.csshrc file" );
-    }
+    return $self;
 }
 
 ### Window and menu definitions ###
 
 sub create_windows() {
+    my ($self) = @_;
     logmsg( 2, "create_windows: started" );
     $windows{main_window} = MainWindow->new( -title => "ClusterSSH" );
     $windows{main_window}->withdraw;    # leave withdrawn until needed
 
-    if ( defined( $config{console_position} )
-        && $config{console_position} =~ /[+-]\d+[+-]\d+/ )
+    if ( defined( $self->config->{console_position} )
+        && $self->config->{console_position} =~ /[+-]\d+[+-]\d+/ )
     {
-        $windows{main_window}->geometry( $config{console_position} );
+        $windows{main_window}->geometry( $self->config->{console_position} );
     }
 
     $menus{entrytext}    = "";
@@ -1651,14 +1287,14 @@ sub create_windows() {
     $windows{history} = $windows{main_window}->Scrolled(
         "ROText",
         -insertborderwidth => 4,
-        -width             => $config{history_width},
-        -height            => $config{history_height},
+        -width             => $self->config->{history_width},
+        -height            => $self->config->{history_height},
         -state             => 'normal',
         -takefocus         => 0,
     );
     $windows{history}->bindtags(undef);
 
-    if ( $config{show_history} ) {
+    if ( $self->config->{show_history} ) {
         $windows{history}->pack(
             -fill   => "x",
             -expand => 1,
@@ -1671,14 +1307,17 @@ sub create_windows() {
     $windows{main_window}->eventDelete('<<Paste>>');
 
     # Set up paste events from scratch
-    if ( $config{key_paste} && $config{key_paste} ne "null" ) {
-        $windows{main_window}
-            ->eventAdd( '<<Paste>>' => '<' . $config{key_paste} . '>' );
+    if ( $self->config->{key_paste} && $self->config->{key_paste} ne "null" )
+    {
+        $windows{main_window}->eventAdd(
+            '<<Paste>>' => '<' . $self->config->{key_paste} . '>' );
     }
 
-    if ( $config{mouse_paste} && $config{mouse_paste} ne "null" ) {
-        $windows{main_window}
-            ->eventAdd( '<<Paste>>' => '<' . $config{mouse_paste} . '>' );
+    if (   $self->config->{mouse_paste}
+        && $self->config->{mouse_paste} ne "null" )
+    {
+        $windows{main_window}->eventAdd(
+            '<<Paste>>' => '<' . $self->config->{mouse_paste} . '>' );
     }
 
     $windows{main_window}->bind(
@@ -1700,7 +1339,7 @@ sub create_windows() {
 
             logmsg( 2, "Got text :", $paste_text, ":" );
 
-            update_display_text($paste_text);
+            $self->update_display_text($paste_text);
 
             # now sent it on
             foreach my $svr ( keys(%servers) ) {
@@ -1731,8 +1370,9 @@ sub create_windows() {
     );
 
     my $manpage = `pod2text -l -q=\"\" $0 2>/dev/null`;
-    if(!$manpage) {
-        $manpage = "Help is missing.\nSee that command 'pod2text' is installed and in PATH.";
+    if ( !$manpage ) {
+        $manpage
+            = "Help is missing.\nSee that command 'pod2text' is installed and in PATH.";
     }
     $windows{mantext}
         = $windows{manpage}->Scrolled( "Text", )->pack( -fill => 'both' );
@@ -1747,14 +1387,15 @@ sub create_windows() {
         -default_button => 'Add',
     );
 
-    if ( $config{max_addhost_menu_cluster_items}
-        && scalar keys %clusters )
+    if ( $self->config->{max_addhost_menu_cluster_items}
+        && scalar $self->cluster->list_tags()  )
     {
-        if ( scalar keys %clusters < $config{max_addhost_menu_cluster_items} )
+        if (scalar
+            scalar $self->cluster->list_tags() < $self->config->{max_addhost_menu_cluster_items} )
         {
             $menus{listbox} = $windows{addhost}->Listbox(
                 -selectmode => 'extended',
-                -height     => scalar keys %clusters,
+                -height     => scalar $self->cluster->list_tags(),
             )->pack();
         }
         else {
@@ -1762,10 +1403,10 @@ sub create_windows() {
                 'Listbox',
                 -scrollbars => 'e',
                 -selectmode => 'extended',
-                -height     => $config{max_addhost_menu_cluster_items},
+                -height => $self->config->{max_addhost_menu_cluster_items},
             )->pack();
         }
-        $menus{listbox}->insert( 'end', sort keys %clusters );
+        $menus{listbox}->insert( 'end', sort $self->cluster->list_tags() );
     }
 
     $windows{host_entry} = $windows{addhost}->add(
@@ -1776,9 +1417,12 @@ sub create_windows() {
         -labelPack    => [ -side => 'left', ],
     )->pack( -side => 'left' );
     logmsg( 2, "create_windows: completed" );
+
+    return $self;
 }
 
 sub capture_map_events() {
+    my ($self) = @_;
 
     # pick up on console minimise/maximise events so we can do all windows
     $windows{main_window}->bind(
@@ -1786,33 +1430,39 @@ sub capture_map_events() {
             logmsg( 3, "Entering MAP" );
 
             my $state = $windows{main_window}->state();
-            logmsg( 3,
-                "state=$state previous=$config{internal_previous_state}" );
+            logmsg(
+                3,
+                "state=$state previous=",
+                $self->config->{internal_previous_state}
+            );
             logmsg( 3, "Entering MAP" );
 
-            if ( $config{internal_previous_state} eq $state ) {
+            if ( $self->config->{internal_previous_state} eq $state ) {
                 logmsg( 3, "repeating the same" );
             }
 
-            if ( $config{internal_previous_state} eq "mid-change" ) {
+            if ( $self->config->{internal_previous_state} eq "mid-change" ) {
                 logmsg( 3, "dropping out as mid-change" );
                 return;
             }
 
-            logmsg( 3,
-                "state=$state previous=$config{internal_previous_state}" );
+            logmsg(
+                3,
+                "state=$state previous=",
+                $self->config->{internal_previous_state}
+            );
 
-            if ( $config{internal_previous_state} eq "iconic" ) {
+            if ( $self->config->{internal_previous_state} eq "iconic" ) {
                 logmsg( 3, "running retile" );
 
-                retile_hosts();
+                $self->retile_hosts();
 
                 logmsg( 3, "done with retile" );
             }
 
-            if ( $config{internal_previous_state} ne $state ) {
+            if ( $self->config->{internal_previous_state} ne $state ) {
                 logmsg( 3, "resetting prev_state" );
-                $config{internal_previous_state} = $state;
+                $self->config->{internal_previous_state} = $state;
             }
         }
     );
@@ -1852,15 +1502,18 @@ sub capture_map_events() {
  #            }
  #        }
  #    );
+
+    return $self;
 }
 
 # for all key event, event hotkeys so there is only 1 key binding
 sub key_event {
+    my ($self)    = @_;
     my $event     = $Tk::event->T;
     my $keycode   = $Tk::event->k;
     my $keysymdec = $Tk::event->N;
     my $keysym    = $Tk::event->K;
-    my $state     = $Tk::event->s || 0;
+    my $state = $Tk::event->s || 0;
 
     $menus{entrytext} = "";
 
@@ -1877,26 +1530,27 @@ sub key_event {
         if ( $keyboardmap{$keysym} );
 
     #warn("debug stop point here");
-    if ( $config{use_hotkeys} eq "yes" ) {
+    if ( $self->config->{use_hotkeys} eq "yes" ) {
         my $combo = $Tk::event->s . $Tk::event->K;
 
         $combo =~ s/Mod\d-//;
 
         logmsg( 3, "combo=$combo" );
 
-        foreach my $hotkey ( grep( /key_/, keys(%config) ) ) {
-            my $key = $config{$hotkey};
+        foreach my $hotkey ( grep( /key_/, keys( %{ $self->config } ) ) ) {
+            my $key = $self->config->{$hotkey};
             next if ( $key eq "null" );    # ignore disabled keys
 
             logmsg( 3, "key=:$key:" );
             if ( $combo =~ /^$key$/ ) {
+                logmsg(3, "matched combo");
                 if ( $event eq "KeyRelease" ) {
                     logmsg( 2, "Received hotkey: $hotkey" );
                     send_text_to_all_servers('%s')
                         if ( $hotkey eq "key_clientname" );
-                    add_host_by_name()
+                    $self->add_host_by_name()
                         if ( $hotkey eq "key_addhost" );
-                    retile_hosts("force")
+                    $self->retile_hosts("force")
                         if ( $hotkey eq "key_retilehosts" );
                     show_history() if ( $hotkey eq "key_history" );
                     exit_prog()    if ( $hotkey eq "key_quit" );
@@ -1910,7 +1564,7 @@ sub key_event {
     exit_prog()
         if ( $state =~ /Control/ && $keysym eq "d" and !%servers );
 
-    update_display_text( $keycodetosym{$keysymdec} )
+    $self->update_display_text( $keycodetosym{$keysymdec} )
         if ( $event eq "KeyPress" && $keycodetosym{$keysymdec} );
 
     # for all servers
@@ -1939,9 +1593,12 @@ sub key_event {
         }
     }
     $xdisplay->flush();
+
+    return $self;
 }
 
 sub create_menubar() {
+    my ($self) = @_;
     logmsg( 2, "create_menubar: started" );
     $menus{bar} = $windows{main_window}->Menu;
     $windows{main_window}->configure( -menu => $menus{bar} );
@@ -1952,12 +1609,12 @@ sub create_menubar() {
             [   "command",
                 "Show History",
                 -command     => \&show_history,
-                -accelerator => $config{key_history},
+                -accelerator => $self->config->{key_history},
             ],
             [   "command",
                 "Exit",
                 -command     => \&exit_prog,
-                -accelerator => $config{key_quit},
+                -accelerator => $self->config->{key_quit},
             ]
         ],
         -tearoff => 0,
@@ -1969,23 +1626,23 @@ sub create_menubar() {
         -menuitems => [
             [   "command",
                 "Retile Windows",
-                -command     => \&retile_hosts,
-                -accelerator => $config{key_retilehosts},
+                -command     => sub{ $self->retile_hosts },
+                -accelerator => $self->config->{key_retilehosts},
             ],
 
 #         [ "command", "Capture Terminal",    -command => \&capture_terminal, ],
             [   "command",
                 "Toggle active state",
-                -command => \&toggle_active_state,
+                -command => sub{ $self->toggle_active_state() },
             ],
             [   "command",
                 "Close inactive sessions",
-                -command => \&close_inactive_sessions,
+                -command => sub{ $self->close_inactive_sessions() },
             ],
             [   "command",
                 "Add Host(s) or Cluster(s)",
-                -command     => \&add_host_by_name,
-                -accelerator => $config{key_addhost},
+                -command     => sub{ $self->add_host_by_name, },
+                -accelerator => $self->config->{key_addhost},
             ],
             '',
         ],
@@ -1996,7 +1653,7 @@ sub create_menubar() {
         -tearoff => 1,
     );
 
-    populate_send_menu();
+    $self->populate_send_menu();
 
     $menus{help} = $menus{bar}->cascade(
         -label     => 'Help',
@@ -2009,23 +1666,20 @@ sub create_menubar() {
         -tearoff => 0,
     );
 
-    #$windows{main_window}->bind(
-    #'<Key>' => \&key_event,
-    #);
-    $windows{main_window}->bind( '<KeyPress>'   => \&key_event, );
-    $windows{main_window}->bind( '<KeyRelease>' => \&key_event, );
+    $windows{main_window}->bind( '<KeyPress>' => [ $self => 'key_event' ], );
+    $windows{main_window}->bind( '<KeyRelease>' => [ $self => 'key_event' ], );
     logmsg( 2, "create_menubar: completed" );
 }
 
 sub populate_send_menu_entries_from_xml {
-    my ( $menu, $menu_xml ) = @_;
+    my ( $self, $menu, $menu_xml ) = @_;
 
     foreach my $menu_ref ( @{ $menu_xml->{menu} } ) {
         if ( $menu_ref->{menu} ) {
             $menus{ $menu_ref->{title} }
                 = $menu->cascade( -label => $menu_ref->{title}, );
-            populate_send_menu_entries_from_xml( $menus{ $menu_ref->{title} },
-                $menu_ref, );
+            $self->populate_send_menu_entries_from_xml(
+                $menus{ $menu_ref->{title} }, $menu_ref, );
             if ( $menu_ref->{detach} && $menu_ref->{detach} =~ m/y/i ) {
                 $menus{ $menu_ref->{title} }->menu->tearOffMenu()->raise;
             }
@@ -2049,33 +1703,34 @@ sub populate_send_menu_entries_from_xml {
         }
     }
 
-    return;
+    return $self;
 }
 
 sub populate_send_menu {
+    my ($self) = @_;
 
     #    my @menu_items = ();
-    if ( !-r $config{send_menu_xml_file} ) {
+    if ( !-r $self->config->{send_menu_xml_file} ) {
         logmsg( 2, 'Using default send menu' );
 
         $menus{send}->command(
             -label       => 'Hostname',
             -command     => [ \&send_text_to_all_servers, '%s' ],
-            -accelerator => $config{key_clientname},
+            -accelerator => $self->config->{key_clientname},
         );
     }
     else {
         logmsg(
             2,
             'Using xml send menu definition from ',
-            $config{send_menu_xml_file}
+            $self->config->{send_menu_xml_file}
         );
 
         eval { require XML::Simple; };
         die 'Cannot load XML::Simple - has it been installed?  ', $@ if ($@);
 
         my $xml = XML::Simple->new( ForceArray => 1, );
-        my $menu_xml = $xml->XMLin( $config{send_menu_xml_file} );
+        my $menu_xml = $xml->XMLin( $self->config->{send_menu_xml_file} );
 
         logmsg( 3, 'xml send menu: ', $/, $xml->XMLout($menu_xml) );
 
@@ -2083,10 +1738,10 @@ sub populate_send_menu {
             $menus{send}->menu->tearOffMenu()->raise;
         }
 
-        populate_send_menu_entries_from_xml( $menus{send}, $menu_xml );
+        $self->populate_send_menu_entries_from_xml( $menus{send}, $menu_xml );
     }
 
-    return;
+    return $self;
 }
 
 sub run {
@@ -2134,51 +1789,105 @@ sub run {
 
     logmsg( 2, "VERSION: $VERSION" );
 
-    load_config_defaults();
-    load_configfile();
+    $self->config->load_configs( $options{'config-file'} );
 
-    dump_config() if ( $options{'output-config'} );
+    if ( $options{use_all_a_records} ) {
+        $self->config->{use_all_a_records}
+            = !$self->config->{use_all_a_records} || 0;
+    }
 
-    check_ssh_hostnames();
+    if ( $options{action} ) {
+        $self->config->{command} = $options{action} ;
+    }
 
-    evaluate_commands() if ( $options{evaluate} );
+    $self->config->{auto_quit} = "yes" if $options{autoquit};
+    $self->config->{auto_quit} = "no"  if $options{'no-autoquit'};
+    $self->config->{auto_close} = $options{autoclose} if $options{'autoclose'};
+
+    $self->config->{window_tiling} = "yes" if $options{tile};
+    $self->config->{window_tiling} = "no"  if $options{'no-tile'};
+
+    $self->config->{user} = $options{username} if ( $options{username} );
+    $self->config->{port} = $options{port}     if ( $options{port} );
+
+    $self->config->{show_history} = 1 if $options{'show-history'};
+    $self->config->{ssh_args} = $options{options} if ( $options{options} );
+
+    $self->config->{terminal_font} = $options{font} if ( $options{font} );
+    $self->config->{terminal_args} = $options{'term-args'}
+            if ( $options{'term-args'} );
+    if ( $self->config->{terminal_args} =~ /-class (\w+)/ ) {
+        $self->config->{terminal_allow_send_events}
+            = "-xrm '$1.VT100.allowSendEvents:true'";
+    }
+
+    $self->config->dump() if ( $options{'output-config'} );
+
+    $self->evaluate_commands() if ( $options{evaluate} );
+
+    $self->get_font_size();
 
     load_keyboard_map();
 
-    get_clusters();
+    # read in normal cluster files
+    $self->cluster->read_cluster_file('/etc/clusters');
+    if ( $self->config->{extra_cluster_file} || $options{'cluster-file'} ) {
+        foreach my $item ( split( /,/, $self->config->{extra_cluster_file} ),
+            $options{'cluster-file'} )
+        {
+            next unless ($item);
+            $item =~ s/\$HOME/$ENV{HOME}/;
+            foreach my $file ( glob($item) ) {
+                if ( !-r $file ) {
+                    warn("Unable to read cluster file '$file': $!\n");
+                    next;
+                }
 
-    list_tags() if ( $options{'list'} );
+                $self->cluster->read_cluster_file($file);
 
-    if (@ARGV) {
-        @servers = resolve_names(@ARGV);
-    }
-    else {
-        if ( $clusters{default} ) {
-            @servers = resolve_names( split( /\s+/, $clusters{default} ) );
+            }
         }
     }
 
-    create_windows();
-    create_menubar();
+    $self->cluster->get_clusters( $self->config->{extra_cluster_file} );
 
-    change_main_window_title();
+    if ( $options{'list'} ) {
+        print( 'Available cluster tags:', $/ );
+        print "\t", $_, $/ foreach ( sort( $self->cluster->list_tags ) );
+        exit_prog();
+    }
+
+    if (@ARGV) {
+        @servers = $self->resolve_names(@ARGV);
+    }
+    else {
+        if ( $self->cluster->get_tag('default') ) {
+            @servers
+                = $self->resolve_names( $self->cluster->get_tag('default') );
+        }
+    }
+
+    $self->create_windows();
+    $self->create_menubar();
+
+    $self->change_main_window_title();
 
     logmsg( 2, "Capture map events" );
-    capture_map_events();
+    $self->capture_map_events();
 
-    setup_helper_script();
-    open_client_windows(@servers);
+    logmsg( 0, 'Opening to: ', join( ' ', @servers ) );
+    $self->open_client_windows(@servers);
 
     # Check here if we are tiling windows.  Here instead of in func so
     # can be tiled from console window if wanted
-    if ( $config{window_tiling} eq "yes" ) {
-        retile_hosts();
+    if ( $self->config->{window_tiling} eq "yes" ) {
+        $self->retile_hosts();
     }
     else {
-        show_console();
+        $self->show_console();
     }
 
-    build_hosts_menu();
+    $self->build_hosts_menu();
 
     logmsg( 2, "Sleeping for a mo" );
     select( undef, undef, undef, 0.5 );
@@ -2191,10 +1900,7 @@ sub run {
         ;    # user puts it somewhere, leave it there
 
     logmsg( 2, "Setting up repeat" );
-    setup_repeat();
-
-    logmsg( 2, "Writing default user configuration" );
-    write_default_user_config();
+    $self->setup_repeat();
 
     # Start event loop
     logmsg( 2, "Starting MainLoop" );
@@ -2244,11 +1950,13 @@ the code until this time.
 
 =item change_main_window_title
 
-=item  check_config
-
-=item  check_ssh_hostnames
-
 =item  close_inactive_sessions
+
+=item  config
+
+=item  helper
+
+=item cluster
 
 =item  create_menubar
 
@@ -2261,8 +1969,6 @@ the code until this time.
 =item  evaluate_commands
 
 =item  exit_prog
-
-=item  find_binary
 
 =item  get_clusters
 
@@ -2304,15 +2010,11 @@ the code until this time.
 
 =item  send_text_to_all_servers
 
-=item  setup_helper_script
-
 =item  setup_repeat
 
 =item  show_console
 
 =item  show_history
-
-=item  split_hostname
 
 =item  terminate_host
 

@@ -3,8 +3,8 @@
    "author" : [
       "Duncan Ferguson <duncan_j_ferguson@yahoo.co.uk>"
    ],
-   "dynamic_config" : 0,
-   "generated_by" : "Module::Build version 0.3603, CPAN::Meta::Converter version 2.112150",
+   "dynamic_config" : 1,
+   "generated_by" : "Module::Build version 0.4003, CPAN::Meta::Converter version 2.112621",
    "license" : [
       "perl_5"
    ],
@@ -16,24 +16,25 @@
    "prereqs" : {
       "build" : {
          "requires" : {
-            "ExtUtils::MakeMaker" : 0
+            "File::Temp" : 0,
+            "File::Which" : 0,
+            "Readonly" : 0,
+            "Test::Differences" : 0,
+            "Test::DistManifest" : 0,
+            "Test::Pod" : 0,
+            "Test::Pod::Coverage" : 0,
+            "Test::Trap" : 0
          }
       },
       "configure" : {
          "requires" : {
-            "Module::Build" : "0.36"
+            "Module::Build" : 0
          }
       },
       "runtime" : {
          "requires" : {
             "Exception::Class" : "1.31",
-            "File::Temp" : 0,
-            "File::Which" : 0,
             "Locale::Maketext" : 0,
-            "Readonly" : 0,
-            "Test::Pod" : 0,
-            "Test::Pod::Coverage" : 0,
-            "Test::Trap" : 0,
             "Tk" : "800.022",
             "Try::Tiny" : 0,
             "X11::Protocol" : "0.56",
@@ -44,7 +45,7 @@
    "provides" : {
       "App::ClusterSSH" : {
          "file" : "lib/App/ClusterSSH.pm",
-         "version" : "4.01_01"
+         "version" : "4.01_03"
       },
       "App::ClusterSSH::Base" : {
          "file" : "lib/App/ClusterSSH/Base.pm",
@@ -56,11 +57,11 @@
       },
       "App::ClusterSSH::Config" : {
          "file" : "lib/App/ClusterSSH/Config.pm",
-         "version" : "0.01"
+         "version" : "0.02"
       },
       "App::ClusterSSH::Helper" : {
          "file" : "lib/App/ClusterSSH/Helper.pm",
-         "version" : "0.01"
+         "version" : "0.02"
       },
       "App::ClusterSSH::Host" : {
          "file" : "lib/App/ClusterSSH/Host.pm",
@@ -83,7 +84,11 @@
       "homepage" : "http://clusterssh.sourceforge.net/",
       "license" : [
          "http://dev.perl.org/licenses/"
+      ],
+      "x_Repository" : [
+         "http://clusterssh.git.sourceforge.net/",
+         "http://github.com/duncs/clusterssh"
       ]
    },
-   "version" : "4.01_01"
+   "version" : "4.01_03"
 }

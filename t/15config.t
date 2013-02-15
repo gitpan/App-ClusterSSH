@@ -8,6 +8,7 @@ use Test::More;
 use Test::Trap;
 use File::Which qw(which);
 use File::Temp qw(tempdir);
+use Test::Differences;
 
 use Readonly;
 
@@ -21,7 +22,7 @@ $config = App::ClusterSSH::Config->new();
 isa_ok( $config, 'App::ClusterSSH::Config' );
 
 Readonly::Hash my %default_config => {
-    terminal                   => "/usr/bin/xterm",
+    terminal                   => "xterm",
     terminal_args              => "",
     terminal_title_opt         => "-T",
     terminal_colorize          => 1,
@@ -59,8 +60,11 @@ Readonly::Hash my %default_config => {
 
     ssh => '/usr/bin/ssh',
 
+    rsh         => 'rsh',
     rsh_args    => "",
+    telnet      => 'telnet',
     telnet_args => "",
+    ssh         => 'ssh',
     ssh_args    => "",
 
     extra_cluster_file => "",
@@ -72,8 +76,8 @@ Readonly::Hash my %default_config => {
     history_height => 10,
 
     command             => q{},
-    title             => q{15CONFIG.T},
-    comms             => q{ssh},
+    title               => q{15CONFIG.T},
+    comms               => q{ssh},
     max_host_menu_items => 30,
 
     max_addhost_menu_cluster_items => 6,
@@ -88,6 +92,7 @@ Readonly::Hash my %default_config => {
     debug => 0,
     lang  => 'en',
 
+    user => $ENV{LOGNAME},
 };
 my %expected = %default_config;
 is_deeply( $config, \%expected, 'default config is correct' );
@@ -101,7 +106,7 @@ trap {
 };
 isa_ok( $trap->die, 'App::ClusterSSH::Exception::Config' );
 is( $trap->die,
-    'Unknown configuration parameters: doesnt_exist,whoops',
+    'Unknown configuration parameters: doesnt_exist,whoops'.$/,
     'got correct error message'
 );
 is_deeply(
@@ -134,7 +139,7 @@ trap {
 };
 isa_ok( $trap->die, 'App::ClusterSSH::Exception::Config' );
 is( $trap->die,
-    "File $file does not exist or cannot be read",
+    "File $file does not exist or cannot be read".$/,
     'got correct error message'
 );
 
@@ -166,7 +171,7 @@ trap {
 is( $trap->leaveby, 'die', 'died ok' );
 isa_ok( $trap->die, 'App::ClusterSSH::Exception::Config' );
 is( $trap->die,
-    'Unknown configuration parameters: missing,rubbish',
+    'Unknown configuration parameters: missing,rubbish'.$/,
     'die message correct'
 );
 isa_ok( $config, "App::ClusterSSH::Config" );
@@ -197,7 +202,7 @@ trap {
 is( $trap->leaveby, 'die', 'died ok' );
 isa_ok( $trap->die, 'App::ClusterSSH::Exception::Config' );
 isa_ok( $config,    "App::ClusterSSH::Config" );
-is( $trap->die, 'argument not provided', 'die message correct' );
+is( $trap->die, 'argument not provided'.$/, 'die message correct' );
 isa_ok( $config, "App::ClusterSSH::Config" );
 is( $trap->stdout, q{}, 'Expecting no STDOUT' );
 is( $trap->stderr, q{}, 'Expecting no STDERR' );
@@ -210,7 +215,7 @@ is( $trap->leaveby, 'die', 'died ok' );
 isa_ok( $trap->die, 'App::ClusterSSH::Exception::Config' );
 isa_ok( $config,    "App::ClusterSSH::Config" );
 is( $trap->die,
-    '"missing" binary not found - please amend $PATH or the cssh config file',
+    '"missing" binary not found - please amend $PATH or the cssh config file'.$/,
     'die message correct'
 );
 isa_ok( $config, "App::ClusterSSH::Config" );
@@ -241,11 +246,11 @@ is( $trap->stdout, q{}, 'Expecting no STDOUT' );
 is( $trap->stderr, q{}, 'Expecting no STDERR' );
 is_deeply( $config, \%expected, 'amended config is correct' );
 is( $path, which('ls'), 'Found correct path to "ls"' );
-is( $path, $newpath, 'No change made from find_binary');
+is( $path, $newpath,    'No change made from find_binary' );
 
 # give false path to force another search
 trap {
-    $newpath = $config->find_binary('/does/not/exist/'.$path);
+    $newpath = $config->find_binary( '/does/not/exist/' . $path );
 };
 is( $trap->leaveby, 'return', 'returned ok' );
 isa_ok( $config, "App::ClusterSSH::Config" );
@@ -254,7 +259,7 @@ is( $trap->stdout, q{}, 'Expecting no STDOUT' );
 is( $trap->stderr, q{}, 'Expecting no STDERR' );
 is_deeply( $config, \%expected, 'amended config is correct' );
 is( $path, which('ls'), 'Found correct path to "ls"' );
-is( $path, $newpath, 'No change made from find_binary');
+is( $path, $newpath,    'No change made from find_binary' );
 
 note('Checks on loading configs');
 note('empty dir');
@@ -268,7 +273,10 @@ isa_ok( $config, "App::ClusterSSH::Config" );
 isa_ok( $config, "App::ClusterSSH::Config" );
 is( $trap->die,    undef, 'die message correct' );
 is( $trap->stdout, q{},   'Expecting no STDOUT' );
-is( $trap->stderr, q{},   'Expecting no STDERR' );
+is( $trap->stderr,
+    'Created new configuration file within $HOME/.clusterssh/'.$/,
+    'Got correct STDERR output for .csshrc'
+);
 
 #note(qx/ls -laR $ENV{HOME}/);
 ok( -d $ENV{HOME} . '/.clusterssh',        '.clusterssh dir exists' );
@@ -292,10 +300,8 @@ isa_ok( $config, "App::ClusterSSH::Config" );
 is( $trap->die,    undef, 'die message correct' );
 is( $trap->stdout, q{},   'Expecting no STDOUT' );
 is( $trap->stderr,
-    'NOTICE: '
-        . $ENV{HOME}
-        . '/.csshrc is no longer used - please see documentation and remove'
-        . $/,
+    'Moved $HOME/.csshrc to $HOME/.csshrc.DISABLED'.$/.
+    'Created new configuration file within $HOME/.clusterssh/'.$/,
     'Got correct STDERR output for .csshrc'
 );
 ok( -d $ENV{HOME} . '/.clusterssh',        '.clusterssh dir exists' );
@@ -303,6 +309,11 @@ ok( -f $ENV{HOME} . '/.clusterssh/config', '.clusterssh config file exists' );
 is_deeply( $config, \%expected, 'amended config is correct' );
 
 note('.csshrc warning and .clusterssh dir plus config');
+# need to recreate .csshrc as it was just moved
+open( $csshrc, '>', $ENV{HOME} . '/.csshrc' );
+print $csshrc 'auto_quit = no', $/;
+close($csshrc);
+$expected{auto_quit} = 'no';
 open( $csshrc, '>', $ENV{HOME} . '/.clusterssh/config' );
 print $csshrc 'window_tiling = no', $/;
 close($csshrc);
@@ -317,10 +328,7 @@ isa_ok( $config, "App::ClusterSSH::Config" );
 is( $trap->die,    undef, 'die message correct' );
 is( $trap->stdout, q{},   'Expecting no STDOUT' );
 is( $trap->stderr,
-    'NOTICE: '
-        . $ENV{HOME}
-        . '/.csshrc is no longer used - please see documentation and remove'
-        . $/,
+    'Moved $HOME/.csshrc to $HOME/.csshrc.DISABLED'.$/,
     'Got correct STDERR output for .csshrc'
 );
 ok( -d $ENV{HOME} . '/.clusterssh',        '.clusterssh dir exists' );
@@ -395,7 +403,7 @@ is( $trap->leaveby, 'die', 'died ok' );
 isa_ok( $trap->die, 'App::ClusterSSH::Exception::Config' );
 isa_ok( $config,    "App::ClusterSSH::Config" );
 is( $trap->die,
-    'Unable to create directory $HOME/.clusterssh: File exists',
+    'Unable to create directory $HOME/.clusterssh: File exists'.$/,
     'die message correct'
 );
 isa_ok( $config, "App::ClusterSSH::Config" );
@@ -414,7 +422,7 @@ is( $trap->leaveby, 'die', 'died ok' );
 isa_ok( $trap->die, 'App::ClusterSSH::Exception::Config' );
 isa_ok( $config,    "App::ClusterSSH::Config" );
 is( $trap->die,
-    'Unable to write default $HOME/.clusterssh/config: Is a directory',
+    'Unable to write default $HOME/.clusterssh/config: Is a directory'.$/,
     'die message correct'
 );
 isa_ok( $config, "App::ClusterSSH::Config" );
@@ -434,7 +442,7 @@ is( $trap->leaveby, 'return', 'died ok' );
 isa_ok( $config, "App::ClusterSSH::Config" );
 is( $trap->stdout, q{}, 'Expecting no STDOUT' );
 is( $trap->stderr,
-    q{Unable to create directory $HOME/.clusterssh: File exists} . $/,
+    q{Unable to create directory $HOME/.clusterssh: File exists} . $/ . $/,
     'Expecting no STDERR'
 );
 
@@ -451,17 +459,17 @@ isa_ok( $config, "App::ClusterSSH::Config" );
 isa_ok( $config, "App::ClusterSSH::Config" );
 is( $trap->stdout, q{}, 'Expecting no STDOUT' );
 is( $trap->stderr,
-    q{Unable to write default $HOME/.clusterssh/config: Is a directory} . $/,
+    q{Unable to write default $HOME/.clusterssh/config: Is a directory} . $/ . $/,
     'Expecting no STDERR'
 );
 
 note('Checking dump');
-$config = App::ClusterSSH::Config->new();
+$config = App::ClusterSSH::Config->new(
+    send_menu_xml_file => $ENV{HOME} . '/.csshrc_send_menu' );
 trap {
     $config->dump();
 };
-my $expected = <<'EOF';
-# Configuration dump produced by "cssh -u"
+my $expected = qq{# Configuration dump produced by "cssh -u"
 auto_close=5
 auto_quit=yes
 console_position=
@@ -481,16 +489,19 @@ max_host_menu_items=30
 menu_host_autotearoff=0
 menu_send_autotearoff=0
 mouse_paste=Button-2
+rsh=rsh
 rsh_args=
 screen_reserve_bottom=60
 screen_reserve_left=0
 screen_reserve_right=0
 screen_reserve_top=0
-send_menu_xml_file=/home/dferguson/.csshrc_send_menu
+send_menu_xml_file=} . $ENV{HOME} . qq{/.csshrc_send_menu
 show_history=0
+ssh=ssh
 ssh_args=
+telnet=telnet
 telnet_args=
-terminal=/usr/bin/xterm
+terminal=xterm
 terminal_allow_send_events=-xrm '*.VT100.allowSendEvents:true'
 terminal_args=
 terminal_bg_style=dark
@@ -507,12 +518,14 @@ terminal_title_opt=-T
 unmap_on_redraw=no
 use_all_a_records=0
 use_hotkeys=yes
+user=} . $ENV{LOGNAME} . qq{
 window_tiling=yes
 window_tiling_direction=right
-EOF
+};
+
 isa_ok( $config, "App::ClusterSSH::Config" );
-is( $trap->die,    undef,     'die message correct' );
-is( $trap->stdout, $expected, 'Expecting no STDOUT' );
-is( $trap->stderr, q{},       'Expecting no STDERR' );
+is( $trap->die, undef, 'die message correct' );
+eq_or_diff( $trap->stdout, $expected, 'Expecting no STDOUT' );
+is( $trap->stderr, q{}, 'Expecting no STDERR' );
 
 done_testing();

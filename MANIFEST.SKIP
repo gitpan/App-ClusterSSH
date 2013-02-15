@@ -5,6 +5,8 @@
 ^.git/
 ^.gitignore
 ^MANIFEST\.bak$
-^MYMETA.yml$
 .*\.swp$
 ^WIP_TASKS$
+^Makefile$
+^Makefile.old$
+pm_to_blib

@@ -4,19 +4,20 @@ use strict;
 use warnings;
 
 use version;
-our $VERSION = version->new('0.01');
+our $VERSION = version->new('0.02');
 
 use Carp;
 use Try::Tiny;
 
 use FindBin qw($Script);
+use File::Copy;
 
 use base qw/ App::ClusterSSH::Base /;
 use App::ClusterSSH::Cluster;
 
 my $clusters;
 my %old_clusters;
-my @app_specific   = (qw/ command title comms method ssh rsh telnet ccon /);
+my @app_specific   = (qw/ command title comms method /);
 my %default_config = (
     terminal                   => "xterm",
     terminal_args              => "",
@@ -54,8 +55,11 @@ my %default_config = (
     terminal_decoration_height => 10,
     terminal_decoration_width  => 8,
 
+    rsh         => 'rsh',
     rsh_args    => "",
+    telnet      => 'telnet',
     telnet_args => "",
+    ssh         => 'ssh',
     ssh_args    => "",
 
     extra_cluster_file => "",
@@ -76,6 +80,8 @@ my %default_config = (
     use_all_a_records => 0,
 
     send_menu_xml_file => $ENV{HOME} . '/.csshrc_send_menu',
+
+    user => $ENV{LOGNAME},
 );
 
 sub new {
@@ -84,20 +90,18 @@ sub new {
     my $self = $class->SUPER::new(%default_config);
 
     ( my $comms = $Script ) =~ s/^c//;
-    $self->{comms} = $comms;
+
+    $comms = 'telnet'  if ( $comms eq 'tel' );
+    $comms = 'console' if ( $comms eq 'con' );
+    $comms = 'ssh'     if ( $comms eq 'lusterssh' );
 
     # list of allowed comms methods
-    if ( 'ssh rsh telnet console' !~ m/\B$comms\B/ ) {
+    if ( 'ssh rsh telnet console' !~ m/\b$comms\b/ ) {
         $self->{comms} = 'ssh';
     }
-
-    if ( $self->{comms}
-        && ( !$self->{ $self->{comms} } || !-e $self->{ $self->{comms} } ) )
-    {
-        $self->{ $self->{comms} } = $self->find_binary( $self->{comms} );
+    else {
+        $self->{comms} = $comms;
     }
-
-    $self->{terminal} = $self->find_binary( $self->{terminal} );
 
     $self->{title} = uc($Script);
 
@@ -131,12 +135,38 @@ sub validate_args {
             App::ClusterSSH::Exception::Config->throw(
                 unknown_config => \@unknown_config,
                 error          => $self->loc(
-                    'Unknown configuration parameters: [_1]',
+                    'Unknown configuration parameters: [_1]' . $/,
                     join( ',', @unknown_config )
                 )
             )
         );
     }
+
+    if ( !$self->{comms} ) {
+        croak(
+            App::ClusterSSH::Exception::Config->throw(
+                error => $self->loc( 'Invalid variable: comms' . $/ ),
+            ),
+        );
+    }
+
+    if ( !$self->{ $self->{comms} } ) {
+        croak(
+            App::ClusterSSH::Exception::Config->throw(
+                error => $self->loc(
+                    'Invalid variable: [_1]' . $/,
+                    $self->{comms}
+                ),
+            ),
+        );
+    }
+
+    #    # Don't search for the path to the binary - assume it is on the path
+    #    # or defined correctly in the config.
+    #    if( !-e $self->{ $self->{comms} } )
+    #    {
+    #        $self->{ $self->{comms} } = $self->find_binary( $self->{comms} );
+    #    }
 
     return $self;
 }
@@ -150,7 +180,8 @@ sub parse_config_file {
         croak(
             App::ClusterSSH::Exception::Config->throw(
                 error => $self->loc(
-                    'File [_1] does not exist or cannot be read', $config_file
+                    'File [_1] does not exist or cannot be read' . $/,
+                    $config_file
                 ),
             ),
         );
@@ -182,7 +213,7 @@ sub parse_config_file {
     }
     close(CFG);
 
-    # grab any c'lusters from the config before validating it
+    # grab any clusters from the config before validating it
     if ( $read_config{clusters} ) {
         $self->debug( 3, "Picked up clusters defined in $config_file" );
         foreach my $cluster ( sort split / /, $read_config{clusters} ) {
@@ -204,16 +235,6 @@ sub parse_config_file {
 
 sub load_configs {
     my ( $self, @configs ) = @_;
-
-    if ( -e $ENV{HOME} . '/.csshrc' ) {
-        warn(
-            $self->loc(
-                'NOTICE: [_1] is no longer used - please see documentation and remove',
-                $ENV{HOME} . '/.csshrc'
-            ),
-            $/
-        );
-    }
 
     for my $config (
         '/etc/csshrc',
@@ -248,6 +269,30 @@ sub load_configs {
 sub write_user_config_file {
     my ($self) = @_;
 
+    # attempt to move the old config file to one side
+    if ( -f "$ENV{HOME}/.csshrc" ) {
+        eval { move( "$ENV{HOME}/.csshrc", "$ENV{HOME}/.csshrc.DISABLED" ) };
+
+        if ($@) {
+            croak(
+                App::ClusterSSH::Exception::Config->throw(
+                    error => $self->loc(
+                        'Unable to move [_1] to [_2]: [_3]' . $/,
+                        '$HOME/.csshrc', '$HOME/.csshrc.DISABLED', $@
+                    ),
+                )
+            );
+        }
+        else {
+            warn(
+                $self->loc(
+                    'Moved [_1] to [_2]' . $/, '$HOME/.csshrc',
+                    '$HOME/.csshrc.DISABLED'
+                ),
+            );
+        }
+    }
+
     return if ( -f "$ENV{HOME}/.clusterssh/config" );
 
     if ( !-d "$ENV{HOME}/.clusterssh" ) {
@@ -255,7 +300,7 @@ sub write_user_config_file {
             croak(
                 App::ClusterSSH::Exception::Config->throw(
                     error => $self->loc(
-                        'Unable to create directory [_1]: [_2]',
+                        'Unable to create directory [_1]: [_2]' . $/,
                         '$HOME/.clusterssh', $!
                     ),
                 ),
@@ -264,34 +309,52 @@ sub write_user_config_file {
         }
     }
 
+    # Debian #673507 - migrate clusters prior to writing ~/.clusterssh/config
+    # in order to update the extra_cluster_file property
+    if (%old_clusters) {
+        if ( open( my $fh, ">", "$ENV{HOME}/.clusterssh/clusters" ) ) {
+            print $fh '# '
+                . $self->loc('Tag definitions moved from old .csshrc file'),
+                $/;
+            foreach ( sort( keys(%old_clusters) ) ) {
+                print $fh $_, ' ', join( ' ', $old_clusters{$_} ), $/;
+            }
+            close($fh);
+        } else {
+            croak(
+                App::ClusterSSH::Exception::Config->throw(
+                    error => $self->loc(
+                        'Unable to write [_1]: [_2]' . $/,
+                        '$HOME/.clusterssh/clusters', $!
+                    ),
+                ),
+            );
+        }
+    }
+
     if ( open( CONFIG, ">", "$ENV{HOME}/.clusterssh/config" ) ) {
         foreach ( sort( keys(%$self) ) ) {
             print CONFIG "$_=$self->{$_}\n";
         }
         close(CONFIG);
+        warn(
+            $self->loc(
+                'Created new configuration file within [_1]' . $/,
+                '$HOME/.clusterssh/'
+            )
+        );
     }
     else {
         croak(
             App::ClusterSSH::Exception::Config->throw(
                 error => $self->loc(
-                    'Unable to write default [_1]: [_2]',
-                    '$HOME/.clusterssh/config',
-                    $!
+                    'Unable to write default [_1]: [_2]' . $/,
+                    '$HOME/.clusterssh/config', $!
                 ),
             ),
         );
     }
 
-    return $self if ( !%old_clusters );
-
-    if ( open( my $fh, ">", "$ENV{HOME}/.clusterssh/clusters" ) ) {
-        print $fh '# '
-            . $self->loc('Tag definitions moved from old .csshrc file'), $/;
-        foreach ( sort( keys(%old_clusters) ) ) {
-            print $fh $_, ' ', join( ' ', $old_clusters{$_} ), $/;
-        }
-        close($fh);
-    }
     return $self;
 }
 
@@ -303,7 +366,7 @@ sub find_binary {
     if ( !$binary ) {
         croak(
             App::ClusterSSH::Exception::Config->throw(
-                error => $self->loc('argument not provided'),
+                error => $self->loc('argument not provided') . $/,
             ),
         );
     }
@@ -355,7 +418,8 @@ sub find_binary {
         croak(
             App::ClusterSSH::Exception::Config->throw(
                 error => $self->loc(
-                    '"[_1]" binary not found - please amend $PATH or the cssh config file',
+                    '"[_1]" binary not found - please amend $PATH or the cssh config file'
+                        . $/,
                     $binary
                 ),
             ),
@@ -396,7 +460,7 @@ sub dump {
 
 =head1 NAME
 
-ClusterSSH::Config
+ClusterSSH::Config - Object representing application configuration
 
 =head1 SYNOPSIS
 

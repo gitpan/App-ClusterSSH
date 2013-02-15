@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use version;
-our $VERSION = version->new('0.01');
+our $VERSION = version->new('0.02');
 
 use Carp;
 use Try::Tiny;
@@ -22,12 +22,12 @@ sub new {
 sub script {
     my ($self, $config ) = @_;
 
-    my $comms = $config->{comms};
-    my $comms_args = $config->{$comms.'_args'};
-    my $command = $config->{command};
+    my $comms = $config->{ $config->{comms} };
+    my $comms_args = $config->{ $config->{comms} . '_args'};
+    my $config_command = $config->{command};
     my $autoclose = $config->{auto_close};
 
-    my $postcommand = $autoclose ? "echo Press RETURN to continue; read IGNORE" : "sleep $autoclose";
+    my $postcommand = $autoclose ? "echo Sleeping for $autoclose seconds; sleep $autoclose" : "echo Press RETURN to continue; read IGNORE"; # : "sleep $autoclose";
 
 #    # P = pipe file
 #    # s = server
@@ -119,7 +119,10 @@ sub script {
                  \$command .= "\$svr";
                }
            }
-           \$command .= " \\\"$command\\\" ; $postcommand";
+           if("$config_command") {
+            \$command .= " \\\"$config_command\\\"";
+           }
+           \$command .= " ; $postcommand";
            warn("Running:\$command\\n"); # for debug purposes
            exec(\$command);
     HERE
@@ -145,7 +148,7 @@ sub script {
 
 =head1 NAME
 
-ClusterSSH::Helper
+ClusterSSH::Helper - Object representing helper script
 
 =head1 SYNOPSIS
 

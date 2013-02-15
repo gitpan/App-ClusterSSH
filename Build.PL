@@ -6,7 +6,7 @@ use Module::Build;
 my $build = Module::Build->new(
     meta_merge => {
         resources => {
-            repository => [
+            Repository => [
                 'http://clusterssh.git.sourceforge.net/',
                 'http://github.com/duncs/clusterssh',
             ],
@@ -34,6 +34,10 @@ my $build = Module::Build->new(
         'File::Which'         => 0,
         'File::Temp'          => 0,
         'Test::DistManifest'  => 0,
+        'Test::Differences'   => 0,
+    },
+    configure_requires => {
+        'Module::Build' => 0,
     },
     add_to_cleanup     => ['App-ClusterSSH-*'],
     create_makefile_pl => 'traditional',

@@ -55,12 +55,14 @@ my %default_config = (
     terminal_decoration_height => 10,
     terminal_decoration_width  => 8,
 
-    rsh         => 'rsh',
-    rsh_args    => "",
-    telnet      => 'telnet',
-    telnet_args => "",
-    ssh         => 'ssh',
-    ssh_args    => "",
+    console      => 'console',
+    console_args => '',
+    rsh          => 'rsh',
+    rsh_args     => "",
+    telnet       => 'telnet',
+    telnet_args  => "",
+    ssh          => 'ssh',
+    ssh_args     => "",
 
     extra_cluster_file => "",
 
@@ -218,7 +220,7 @@ sub parse_config_file {
         $self->debug( 3, "Picked up clusters defined in $config_file" );
         foreach my $cluster ( sort split / /, $read_config{clusters} ) {
             if ( $read_config{$cluster} ) {
-                $clusters->register_tag( $cluster, $read_config{$cluster} );
+                $clusters->register_tag( $cluster, split(/ /,$read_config{$cluster}) );
                 $old_clusters{$cluster} = $read_config{$cluster};
                 delete( $read_config{$cluster} );
             }

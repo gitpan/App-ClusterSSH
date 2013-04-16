@@ -8,6 +8,7 @@ our $VERSION = version->new('0.01');
 
 use Carp;
 use Try::Tiny;
+use English qw( -no_match_vars );
 
 use base qw/ App::ClusterSSH::Base /;
 
@@ -23,14 +24,84 @@ sub new {
     return $master_object_ref;
 }
 
-sub get_clusters {
+sub get_cluster_entries {
     my ( $self, @files ) = @_;
 
-    for my $file ( '/etc/clusters', $ENV{HOME}.'/.clusterssh/clusters',@files ) {
-        $self->debug(3, 'Loading in config from: ', $file);
+    for my $file ( '/etc/clusters', $ENV{HOME} . '/.clusterssh/clusters',
+        @files )
+    {
+        $self->debug( 3, 'Loading in clusters from: ', $file );
         $self->read_cluster_file($file);
     }
 
+    return $self;
+}
+
+sub get_tag_entries {
+    my ( $self, @files ) = @_;
+
+    for my $file ( '/etc/tags', $ENV{HOME} . '/.clusterssh/tags', @files ) {
+        $self->debug( 3, 'Loading in tags from: ', $file );
+        $self->read_tag_file($file);
+    }
+
+    return $self;
+}
+
+sub get_external_clusters {
+    my ( $self, $external_command, @tags ) = @_;
+
+    $self->debug( 3, 'Running tags through external command' );
+    $self->debug( 4, 'External command: ', $external_command );
+    $self->debug( 3, 'Tags: ', join( ',', @tags ) );
+
+    my $command = "$external_command @tags";
+
+    $self->debug( 3, 'Running ', $command );
+
+    my $result;
+    my $return_code;
+    {
+        local $SIG{CHLD} = undef;
+        $result      = qx/ $command /;
+        $return_code = $CHILD_ERROR >> 8;
+    }
+    chomp($result);
+
+    $self->debug( 3, "Result: $result" );
+    $self->debug( 3, "Return code: $return_code" );
+
+    if ( $return_code != 0 ) {
+        croak(
+            App::ClusterSSH::Exception::Cluster->throw(
+                error => $self->loc(
+                    "External command failure.\nCommand: [_1]\nReturn Code: [_2]",
+                    $command,
+                    $return_code,
+                ),
+            )
+        );
+    }
+
+    my @results = split / /, $result;
+
+    return @results;
+}
+
+sub read_tag_file {
+    my ( $self, $filename ) = @_;
+    $self->debug( 2, 'Reading tags from file ', $filename );
+    if ( -f $filename ) {
+        my %hosts
+            = $self->load_file( type => 'cluster', filename => $filename );
+        foreach my $host ( keys %hosts ) {
+            $self->debug( 4, "Got entry for $host on tags $hosts{$host}" );
+            $self->register_host( $host, split( /\s+/, $hosts{$host} ) );
+        }
+    }
+    else {
+        $self->debug( 2, 'No file found to read' );
+    }
     return $self;
 }
 
@@ -39,38 +110,33 @@ sub read_cluster_file {
     $self->debug( 2, 'Reading clusters from file ', $filename );
 
     if ( -f $filename ) {
-        open( my $fh, '<', $filename )
-            || croak(
-            App::ClusterSSH::Exception::Cluster->throw(
-                error => $self->loc(
-                    'Unable to read file [_1]: [_2]',
-                    $filename, $!
-                )
-            )
-            );
+        my %tags
+            = $self->load_file( type => 'cluster', filename => $filename );
 
-        my $line;
-        while ( defined( $line = <$fh> ) ) {
-            next
-                if ( $line =~ /^\s*$/ || $line =~ /^#/ )
-                ;    # ignore blank lines & commented lines
-            chomp $line;
-            if ( $line =~ s/\\\s*$// ) {
-                $line .= <$fh>;
-                redo unless eof($fh);
-            }
-            my @line = split( /\s+/, $line );
-
-        #s/^([\w-]+)\s*//;               # remote first word and stick into $1
-
-            $self->debug( 3, "read line: $line" );
-            $self->register_tag(@line);
+        foreach my $tag ( keys %tags ) {
+            $self->register_tag( $tag, split( /\s+/, $tags{$tag} ) );
         }
-
-        close($fh);
     }
     else {
-        $self->debug( 2, 'No file found to read');
+        $self->debug( 2, 'No file found to read' );
+    }
+    return $self;
+}
+
+sub register_host {
+    my ( $self, $node, @tags ) = @_;
+    $self->debug( 2, "Registering node $node on tags:", join( ' ', @tags ) );
+
+    foreach my $tag (@tags) {
+        if ( $self->{tags}->{$tag} ) {
+            $self->{tags}->{$tag}
+                = [ sort @{ $self->{tags}->{$tag} }, $node ];
+        }
+        else {
+            $self->{tags}->{$tag} = [$node];
+        }
+
+        #push(@{ $self->{tags}->{$tag} }, $node);
     }
     return $self;
 }
@@ -80,7 +146,7 @@ sub register_tag {
 
     $self->debug( 2, "Registering tag $tag: ", join( ' ', @nodes ) );
 
-    $self->{$tag} = \@nodes;
+    $self->{tags}->{$tag} = \@nodes;
 
     return $self;
 }
@@ -88,11 +154,14 @@ sub register_tag {
 sub get_tag {
     my ( $self, $tag ) = @_;
 
-    if ( $self->{$tag} ) {
-        $self->debug( 2, "Retrieving tag $tag: ",
-            join( ' ', $self->{$tag} ) );
+    if ( $self->{tags}->{$tag} ) {
+        $self->debug(
+            2,
+            "Retrieving tag $tag: ",
+            join( ' ', sort @{ $self->{tags}->{$tag} } )
+        );
 
-        return @{ $self->{$tag} };
+        return sort @{ $self->{tags}->{$tag} };
     }
 
     $self->debug( 2, "Tag $tag is not registered" );
@@ -101,7 +170,12 @@ sub get_tag {
 
 sub list_tags {
     my ($self) = @_;
-    return keys(%$self);
+    return sort keys( %{ $self->{tags} } );
+}
+
+sub dump_tags {
+    my ($self) = @_;
+    return %{ $self->{tags} };
 }
 
 #use overload (
@@ -134,17 +208,35 @@ Object representing application configuration
 
 Create a new object.  Object should be common across all invocations.
 
-=item $cluster->get_clusters($filename);
+=item $cluster->get_cluster_entries($filename);
 
-Read in /etc/clusters and any other given file name and register the tags found.
+Read in /etc/clusters, $HOME/.clusterssh/clusters and any other given 
+file name and register the tags found.
+
+=item @resolved_tags=get_external_clusters($path_to_binary, @tags)
+
+Define and use an external script to resolve tags into hostnames.
+
+=item $cluster->get_tag_entries($filename);
+
+Read in /etc/tags, $HOME/.clusterssh/tags and any other given 
+file name and register the tags found.
 
 =item $cluster->read_cluster_file($filename);
 
 Read in the given cluster file and register the tags found
 
+=item $cluster->read_tag_file($filename);
+
+Read in the given tag file and register the tags found
+
 =item $cluster->register_tag($tag,@hosts);
 
 Register the given tag name with the given host names.
+
+=item $cluster->register_host($host,@tags);
+
+Register the given host on the provided tags.
 
 =item @entries = $cluster->get_tag('tag');
 
@@ -153,6 +245,10 @@ Retrieve all entries for the given tag
 =item @tags = $cluster->list_tags();
 
 Return an array of all available tag names
+
+=item %tags = $cluster->dump_tags();
+
+Returns a hash of all tag data.
 
 =back
 

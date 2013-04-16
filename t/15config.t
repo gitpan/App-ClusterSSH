@@ -69,7 +69,8 @@ Readonly::Hash my %default_config => {
     ssh          => 'ssh',
     ssh_args     => "",
 
-    extra_cluster_file => "",
+    extra_cluster_file       => "",
+    external_cluster_command => '',
 
     unmap_on_redraw => "no",
 
@@ -139,9 +140,9 @@ my $file = "$Bin/$Script.doesntexist";
 trap {
     $config = $config->parse_config_file( $file, );
 };
-isa_ok( $trap->die, 'App::ClusterSSH::Exception::Config' );
+isa_ok( $trap->die, 'App::ClusterSSH::Exception::LoadFile' );
 is( $trap->die,
-    "File $file does not exist or cannot be read" . $/,
+    "Unable to read file $file: No such file or directory" . $/,
     'got correct error message'
 );
 
@@ -484,6 +485,7 @@ console=console
 console_args=
 console_position=
 debug=0
+external_cluster_command=
 extra_cluster_file=
 history_height=10
 history_width=40

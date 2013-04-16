@@ -3,7 +3,7 @@ package App::ClusterSSH;
 use 5.008.004;
 use warnings;
 use strict;
-use version; our $VERSION = version->new('4.01_05');
+use version; our $VERSION = version->new('4.02_01');
 
 use Carp;
 
@@ -98,6 +98,7 @@ my @options_spec = (
     'man|H',
     'action|a=s',
     'cluster-file|c=s',
+    'tag-file|c=s',
     'config-file|C=s',
     'evaluate|e=s',
     'tile|g',
@@ -391,9 +392,12 @@ sub resolve_names(@) {
         if ( $dirty =~ s/^(.*)@// ) {
             $username = $1;
         }
+
+        my @tag_list = $self->cluster->get_tag($dirty);
+
         if (   $self->config->{use_all_a_records}
             && $dirty !~ m/^(\d{1,3}\.?){4}$/
-            && !defined( $self->cluster->get_tag($dirty) ) )
+            && !@tag_list )
         {
             my $hostobj = gethostbyname($dirty);
             if ( defined($hostobj) ) {
@@ -408,9 +412,9 @@ sub resolve_names(@) {
                 }
             }
         }
-        if ( $self->cluster->get_tag($dirty) ) {
+        if (@tag_list) {
             logmsg( 3, '... it is a cluster' );
-            foreach my $node ( $self->cluster->get_tag($dirty) ) {
+            foreach my $node (@tag_list) {
                 if ($username) {
                     $node =~ s/^(.*)@//;
                     $node = $username . '@' . $node;
@@ -421,12 +425,33 @@ sub resolve_names(@) {
         }
     }
 
+    # now run everything through the external command, if one is defined
+    if ( $self->config->{external_cluster_command} ) {
+        $self->debug( 4, 'External cluster command defined' );
+
+        # use a second array here in case of failure so previously worked
+        # out entries are not lost
+        my @new_servers;
+        eval {
+            @new_servers
+                = $self->cluster->get_external_clusters(
+                $self->config->{external_cluster_command}, @servers );
+        };
+
+        if ($@) {
+            warn $@, $/;
+        }
+        else {
+            @servers = @new_servers;
+        }
+    }
+
     # now clean the array up
     @servers = grep { $_ !~ m/^$/ } @servers;
 
-    if ($self->config->{unique_servers}) {
+    if ( $self->config->{unique_servers} ) {
         logmsg( 3, 'removing duplicate server names' );
-        @servers=remove_repeated_servers(@servers);
+        @servers = remove_repeated_servers(@servers);
     }
 
     logmsg( 3, 'leaving with ', $_ ) foreach (@servers);
@@ -435,9 +460,9 @@ sub resolve_names(@) {
 }
 
 sub remove_repeated_servers {
-    my %all=();
-    @all{@_}=1;
-    return (keys %all);
+    my %all = ();
+    @all{@_} = 1;
+    return ( keys %all );
 }
 
 sub change_main_window_title() {
@@ -616,7 +641,8 @@ sub open_client_windows(@) {
         my $server_object = App::ClusterSSH::Host->parse_host_string($_);
 
         my $username = $server_object->get_username();
-        $username = $self->config->{user} if ( !$username && $self->config->{user} );
+        $username = $self->config->{user}
+            if ( !$username && $self->config->{user} );
         my $port = $server_object->get_port();
         $port = $self->config->{port} if ( $self->config->{port} );
         my $server = $server_object->get_hostname();
@@ -1871,30 +1897,25 @@ sub run {
     load_keyboard_map();
 
     # read in normal cluster files
-    $self->cluster->read_cluster_file('/etc/clusters');
-    if ( $self->config->{extra_cluster_file} || $options{'cluster-file'} ) {
-        foreach my $item ( split( /,/, $self->config->{extra_cluster_file} ),
-            $options{'cluster-file'} )
-        {
-            next unless ($item);
-            $item =~ s/\$HOME/$ENV{HOME}/;
-            foreach my $file ( glob($item) ) {
-                if ( !-r $file ) {
-                    warn("Unable to read cluster file '$file': $!\n");
-                    next;
-                }
+    $self->config->{extra_cluster_file} .= ',' . $options{'cluster-file'}
+        if ( $options{'cluster-file'} );
+    $self->config->{extra_tag_file} .= ',' . $options{'tag-file'}
+        if ( $options{'tag-file'} );
 
-                $self->cluster->read_cluster_file($file);
-
-            }
-        }
-    }
-
-    $self->cluster->get_clusters( $self->config->{extra_cluster_file} );
+    $self->cluster->get_cluster_entries( split /,/,
+        $self->config->{extra_cluster_file} || '' );
+    $self->cluster->get_tag_entries( split /,/,
+        $self->config->{extra_tag_file} || '' );
 
     if ( $options{'list'} ) {
         print( 'Available cluster tags:', $/ );
         print "\t", $_, $/ foreach ( sort( $self->cluster->list_tags ) );
+
+        $self->debug(
+            4,
+            "Full clusters dump: ",
+            $self->_dump_args_hash( $self->cluster->dump_tags )
+        );
         exit_prog();
     }
 

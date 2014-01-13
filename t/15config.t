@@ -36,8 +36,11 @@ Readonly::Hash my %default_config => {
     key_addhost             => "Control-Shift-plus",
     key_clientname          => "Alt-n",
     key_history             => "Alt-h",
+    key_localname           => "Alt-l",
     key_retilehosts         => "Alt-r",
+    key_macros_enable       => "Alt-p",
     key_paste               => "Control-v",
+    key_username            => "Alt-u",
     mouse_paste             => "Button-2",
     auto_quit               => "yes",
     auto_close              => 5,
@@ -82,6 +85,13 @@ Readonly::Hash my %default_config => {
     title               => q{15CONFIG.T},
     comms               => q{ssh},
     max_host_menu_items => 30,
+
+    macros_enabled   => 'yes',
+    macro_servername => '%s',
+    macro_hostname   => '%h',
+    macro_username   => '%u',
+    macro_newline    => '%n',
+    macro_version    => '%v',
 
     max_addhost_menu_cluster_items => 6,
     menu_send_autotearoff          => 0,
@@ -304,7 +314,7 @@ isa_ok( $config, "App::ClusterSSH::Config" );
 is( $trap->die,    undef, 'die message correct' );
 is( $trap->stdout, q{},   'Expecting no STDOUT' );
 is( $trap->stderr,
-    'Moved $HOME/.csshrc to $HOME/.csshrc.DISABLED' 
+    'Moved $HOME/.csshrc to $HOME/.csshrc.DISABLED'
         . $/
         . 'Created new configuration file within $HOME/.clusterssh/'
         . $/,
@@ -466,7 +476,7 @@ isa_ok( $config, "App::ClusterSSH::Config" );
 isa_ok( $config, "App::ClusterSSH::Config" );
 is( $trap->stdout, q{}, 'Expecting no STDOUT' );
 is( $trap->stderr,
-    q{Unable to write default $HOME/.clusterssh/config: Is a directory} 
+    q{Unable to write default $HOME/.clusterssh/config: Is a directory}
         . $/
         . $/,
     'Expecting no STDERR'
@@ -492,10 +502,19 @@ history_width=40
 key_addhost=Control-Shift-plus
 key_clientname=Alt-n
 key_history=Alt-h
+key_localname=Alt-l
+key_macros_enable=Alt-p
 key_paste=Control-v
 key_quit=Control-q
 key_retilehosts=Alt-r
+key_username=Alt-u
 lang=en
+macro_hostname=%h
+macro_newline=%n
+macro_servername=%s
+macro_username=%u
+macro_version=%v
+macros_enabled=yes
 max_addhost_menu_cluster_items=6
 max_host_menu_items=30
 menu_host_autotearoff=0

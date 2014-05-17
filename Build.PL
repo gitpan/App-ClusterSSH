@@ -3,7 +3,47 @@ use warnings;
 
 use Module::Build;
 
-my $build = Module::Build->new(
+my $class = Module::Build->subclass(
+    class => "Module::Build::Custom",
+    code  => q{
+        sub ACTION_email {
+            my ($self, @args) = @_;
+
+            # Make sure all tests pass first
+            $self->depends_on("test");
+
+            print "Use '--changes <N>' to define how many to output.  Default: 1", $/;
+            my $change_count = $self->args('changes') || 1;
+
+            use CPAN::Changes;
+            my @changes = CPAN::Changes->load( 'Changes' )->releases;
+
+            if($changes[-1]->date =~ m/^0000/) {
+                die '#' x 40, $/, ' ' x 3, "FATAL: 'Changes' date not updated",$/,'#' x 40, $/;
+            }
+
+            print $/;
+
+            foreach my $change ( 1 .. $change_count ) {
+                print $changes[ 0 - $change]->serialize;
+            }
+
+            my $v=$self->dist_version;
+
+            print <<"EOF";
+==========
+Bug Reports and Issues: https://github.com/duncs/clusterssh/issues
+Project Repository: http://github.com/duncs/clusterssh
+CPAN release: http://search.cpan.org/~duncs/App-ClusterSSH-$v
+SF release: http://sourceforge.net/projects/clusterssh/files/2.%20ClusterSSH%20Series%204/App-ClusterSSH-${v}.tar.gz/download
+SF/net git repo: https://sourceforge.net/scm/?type=git&group_id=89139
+==========
+EOF
+        }
+    },
+);
+
+my $build = $class->new(
     meta_merge => {
         resources => {
             Repository => [
@@ -35,11 +75,13 @@ my $build = Module::Build->new(
         'File::Temp'          => 0,
         'Test::DistManifest'  => 0,
         'Test::Differences'   => 0,
+        'CPAN::Changes'       => 0.27,
     },
     configure_requires => { 'Module::Build' => 0, },
     add_to_cleanup     => ['App-ClusterSSH-*'],
     create_makefile_pl => 'traditional',
     script_files       => 'bin',
+    get_options => { changes => { type => '=s' }, },
 );
 
 $build->create_build_script;

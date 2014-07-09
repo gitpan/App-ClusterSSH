@@ -7,6 +7,7 @@ use version;
 our $VERSION = version->new('0.03');
 
 use Carp;
+use Net::hostent;
 
 use base qw/ App::ClusterSSH::Base /;
 
@@ -25,7 +26,7 @@ sub new {
     }
 
     # remove any keys undef values - must be a better way...
-    foreach my $remove (qw/ port username /) {
+    foreach my $remove (qw/ port username geometry /) {
         if ( !$args{$remove} && grep {/^$remove$/} keys(%args) ) {
             delete( $args{$remove} );
         }
@@ -60,11 +61,6 @@ sub new {
     return $self;
 }
 
-sub get_givenname {
-    my ($self) = @_;
-    return $self->{hostname};
-}
-
 sub get_hostname {
     my ($self) = @_;
     return $self->{hostname};
@@ -73,6 +69,19 @@ sub get_hostname {
 sub get_username {
     my ($self) = @_;
     return $self->{username} || q{};
+}
+
+sub get_type {
+    my ($self) = @_;
+    if($self->check_ssh_hostname) {
+        return 'ssh_alias';
+    }
+    return $self->{type} || q{};
+}
+
+sub get_geometry {
+    my ($self) = @_;
+    return $self->{geometry} || q{};
 }
 
 sub set_username {
@@ -92,6 +101,18 @@ sub set_port {
     return $self;
 }
 
+sub set_type {
+    my ( $self, $type ) = @_;
+    $self->{type} = $type;
+    return $self;
+}
+
+sub set_geometry {
+    my ( $self, $geometry ) = @_;
+    $self->{geometry} = $geometry;
+    return $self;
+}
+
 sub get_master {
     my ($self) = @_;
     return $self->{master} || q{};
@@ -107,22 +128,20 @@ sub get_realname {
     my ($self) = @_;
 
     if ( !$self->{realname} ) {
-        if ( $self->{type} && $self->{type} eq 'name' ) {
-            if ( $ssh_hostname_for{ $self->{hostname} } ) {
-                $self->{realname} = $self->{hostname};
-            }
-            else {
-                my $gethost_obj = gethostbyname( $self->{hostname} );
-
-                $self->{realname}
-                    = defined($gethost_obj)
-                    ? $gethost_obj->name()
-                    : $self->{hostname};
-            }
-        }
-        else {
+        if ( $self->get_type eq 'ssh_alias' ) {
             $self->{realname} = $self->{hostname};
         }
+        else {
+            my $gethost_obj = gethostbyname( $self->{hostname} );
+
+            $self->{realname}
+                = defined($gethost_obj)
+                ? $gethost_obj->name()
+                : $self->{hostname};
+        }
+    }
+    else {
+        $self->{realname} = $self->{hostname};
     }
     return $self->{realname};
 }
@@ -136,22 +155,24 @@ sub parse_host_string {
     # check for bracketed IPv6 addresses
     if ($host_string =~ m{
             \A 
-            (?:(.*?)@)?     # username@ (optional)
-            \[([\w:]*)\]    # [<sequence of chars>]
-            (?::(\d+))?     # :port     (optional)
+            (?:(.*?)@)?               # username@ (optional)
+            \[([\w:]*)\]              # [<sequence of chars>]
+            (?::(\d+))?               # :port     (optional)
+            (?:=(\d+\D\d+\D\d+\D\d))? # =geometry (optional)
             \z
         }xms
         )
     {
         $self->debug(
             5,
-            $self->loc( 'bracketed IPv6: u=[_1] h=[_2] p=[_3]', $1, $2, $3 ),
+            $self->loc( 'bracketed IPv6: u=[_1] h=[_2] p=[_3] g=[_4]', $1, $2, $3, $4 ),
         );
         return __PACKAGE__->new(
             parse_string => $parse_string,
             username     => $1,
             hostname     => $2,
             port         => $3,
+            geometry     => $4,
             type         => 'ipv6',
         );
     }
@@ -159,58 +180,79 @@ sub parse_host_string {
     # check for standard IPv4 host.domain/IP address
     if ($host_string =~ m{
             \A 
-            (?:(.*?)@)?     # username@ (optional)
-            ([\w\.-]*)      # hostname[.domain[.domain] | 123.123.123.123
-            (?::(\d+))?     # :port     (optional)
+            (?:(.*?)@)?               # username@ (optional)
+            ([\w\.-]*)                # hostname[.domain[.domain] | 123.123.123.123
+            (?::(\d+))?               # :port     (optional)
+            (?:=(\d+\D\d+\D\d+\D\d+))? # =geometry (optional)
             \z
         }xms
         )
     {
         $self->debug( 5,
-            $self->loc( 'std IPv4: u=[_1] h=[_2] p=[_3]', $1, $2, $3 ),
+            $self->loc( 'std IPv4: u=[_1] h=[_2] p=[_3] g=[_4]', $1, $2, $3, $4 ),
         );
         return __PACKAGE__->new(
             parse_string => $parse_string,
             username     => $1,
             hostname     => $2,
             port         => $3,
+            geometry     => $4,
             type         => 'ipv4',
         );
     }
 
     # Check for unbracketed IPv6 addresses as best we can...
+    my $username = q{};
+    my $geometry = q{};
+    my $port     = q{};
+
     # first, see if there is a username to grab
-    my $username = q[];
-    if ( $host_string =~ s/\A(?:(.*)@)// ) {
+    if ( $host_string =~ s/\A(?:(.*?)@)// ) {
 
         # catch where @ is in host_string but no text before it
-        $username = $1 || q{};
+        $username = $1;
+    }
+
+    # check for any geometry settings
+    if ( $host_string =~ s/(?:=(.*?)$)// ) {
+        $geometry = $1;
+    }
+
+    # Check for a '/nnnn' port definition 
+    if ( $host_string =~ s!(?:/(\d+)$)!! ) {
+       $port = $1;
     }
 
     # use number of colons as a possible indicator
     my $colon_count = $host_string =~ tr/://;
 
     # if there are 7 colons assume its a full IPv6 address
+    # if its 8 then assumed full IPv6 address with a port
     # also catch localhost address here
-    if ( $colon_count == 7 || $host_string eq '::1' ) {
+    if ( $colon_count == 7 || $colon_count == 8 || $host_string eq '::1' ) {
+        if( $colon_count == 8) {
+            $host_string =~ s/(?::(\d+?))$//;
+            $port = $1;
+        }
         $self->debug(
             5,
             $self->loc(
-                'IPv6: u=[_1] h=[_2] p=[_3]',
-                $username, $host_string, ''
+                'IPv6: u=[_1] h=[_2] p=[_3] g=[_4]',
+                $username, $host_string, $port, $geometry,
             ),
         );
         return __PACKAGE__->new(
             parse_string => $parse_string,
             username     => $username,
             hostname     => $host_string,
-            port         => q{},
+            port         => $port,
+            geometry     => $geometry,
             type         => 'ipv6',
         );
     }
     if (   $colon_count > 1
         && $colon_count < 8
-        && $host_string =~ m/:(\d+)$/xsm )
+    )
     {
         warn 'Ambiguous host string: "', $host_string, '"',   $/;
         warn 'Assuming you meant "[',    $host_string, ']"?', $/;
@@ -218,50 +260,20 @@ sub parse_host_string {
         $self->debug(
             5,
             $self->loc(
-                'Ambiguous IPv6 u=[_1] h=[_2] p=[_3]', $username,
-                $host_string,                          ''
+                'Ambiguous IPv6 u=[_1] h=[_2] p=[_3] g=[_4]', $username,
+                $host_string, $port, $geometry,
             )
         );
-
-        #warn "host_string=$host_string";
-        #warn "username=$username";
-        #warn $self->loc('some string to return');
-        #warn 'debug done, returning';
 
         return __PACKAGE__->new(
             parse_string => $parse_string,
             username     => $username,
             hostname     => $host_string,
-            port         => q{},
+            port         => $port,
+            geometry     => $geometry,
             type         => 'ipv6',
         );
     }
-    else {
-        my $port = q{};
-        if ( $host_string =~ s/:(\d+)$// ) {
-            $port = $1;
-        }
-
-        my $hostname = $host_string;
-
-        $self->debug(
-            5,
-            $self->loc(
-                'Default parse u=[_1] h=[_2] p=[_3]',
-                $username, $hostname, $port
-            )
-        );
-
-        return __PACKAGE__->new(
-            parse_string => $parse_string,
-            username     => $username,
-            hostname     => $hostname,
-            port         => $port,
-            type         => 'name',
-        );
-    }
-
-    # Due to above rules, we'll never get this far anyhow
 
     # if we got this far, we didnt parse the host_string properly
     croak(
@@ -334,6 +346,10 @@ Create a new host object.  'hostname' is a required arg, 'username' and
 
 =item $host->get_master
 
+=item $host->get_geometry
+
+=item $host->get_type
+
 Return specific details about the host
 
 =item $host->set_username
@@ -341,6 +357,10 @@ Return specific details about the host
 =item $host->set_port
 
 =item $host->set_master
+
+=item $host->set_geometry
+
+=item $host->set_type
 
 Set specific details about the host after its been created.
 

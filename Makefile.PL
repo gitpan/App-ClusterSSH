@@ -14,6 +14,7 @@ WriteMakefile
                    'Readonly' => 0,
                    'Test::Differences' => 0,
                    'Test::DistManifest' => 0,
+                   'Test::PerlTidy' => 0,
                    'Test::Pod' => 0,
                    'Test::Pod::Coverage' => 0,
                    'Test::Trap' => 0,

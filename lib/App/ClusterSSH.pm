@@ -3,9 +3,9 @@ package App::ClusterSSH;
 use 5.008.004;
 use warnings;
 use strict;
-use version; our $VERSION = version->new('4.03_02');
+use version; our $VERSION = version->new('4.03_03');
 
-use Carp;
+use Carp qw/cluck/;
 
 use base qw/ App::ClusterSSH::Base /;
 use App::ClusterSSH::Host;
@@ -55,8 +55,8 @@ sub new {
     my $self = $class->SUPER::new(%args);
 
     $self->{cluster} = App::ClusterSSH::Cluster->new( parent => $self, );
-    $self->{config} = App::ClusterSSH::Config->new( parent => $self, );
-    $self->{helper} = App::ClusterSSH::Helper->new( parent => $self, );
+    $self->{config}  = App::ClusterSSH::Config->new( parent => $self, );
+    $self->{helper}  = App::ClusterSSH::Helper->new( parent => $self, );
     $self->{options} = App::ClusterSSH::Getopt->new( parent => $self, );
 
     # catch and reap any zombies
@@ -412,8 +412,7 @@ sub resolve_names(@) {
         # out entries are not lost
         my @new_servers;
         eval {
-            @new_servers
-                = $self->cluster->get_external_clusters( @servers );
+            @new_servers = $self->cluster->get_external_clusters(@servers);
         };
 
         if ($@) {
@@ -453,6 +452,8 @@ sub show_history() {
     my ($self) = @_;
     if ( $self->config->{show_history} ) {
         $windows{history}->packForget();
+        $windows{history}->selectAll();
+        $windows{history}->deleteSelected();
         $self->config->{show_history} = 0;
     }
     else {
@@ -519,7 +520,7 @@ sub send_text($@) {
             my $macro_servername = $self->config->{macro_servername};
             my $servername       = $svr;
             $servername =~ s/\s+//;
-            $text       =~ s/$macro_servername/$servername/xsmg;
+            $text =~ s/$macro_servername/$servername/xsmg;
         }
         $text =~ s/%h/hostname()/xsmeg;
 
@@ -588,6 +589,15 @@ sub send_text_to_all_servers {
 
     foreach my $svr ( keys(%servers) ) {
         $self->send_text( $svr, $text )
+            if ( $servers{$svr}{active} == 1 );
+    }
+}
+
+sub send_variable_text_to_all_servers($&) {
+    my ( $self, $code ) = @_;
+
+    foreach my $svr ( keys(%servers) ) {
+        $self->send_text( $svr, $code->($svr) )
             if ( $servers{$svr}{active} == 1 );
     }
 }
@@ -703,6 +713,7 @@ sub open_client_windows(@) {
         }
 
         if ( $servers{$server}{pid} == 0 ) {
+
           # this is the child
           # Since this is the child, we can mark any server unresolved without
           # affecting the main program
@@ -1165,9 +1176,9 @@ sub set_half_inactive() {
     my ($self) = @_;
     logmsg( 2, "Setting approx half of all hosts to inactive" );
 
-	my(@keys) = keys(%servers);
-	$#keys /= 2;
-    foreach my $svr ( @keys ) {
+    my (@keys) = keys(%servers);
+    $#keys /= 2;
+    foreach my $svr (@keys) {
         $servers{$svr}{active} = 0;
     }
 }
@@ -1462,14 +1473,13 @@ sub create_windows() {
     );
 
     my @tags = $self->cluster->list_tags();
-    my @external_tags = map { "$_ *" } $self->cluster->list_external_clusters();
-    push (@tags, @external_tags);
+    my @external_tags = map {"$_ *"} $self->cluster->list_external_clusters();
+    push( @tags, @external_tags );
 
     if ( $self->config->{max_addhost_menu_cluster_items}
         && scalar @tags )
     {
-        if (scalar @tags
-            < $self->config->{max_addhost_menu_cluster_items} )
+        if ( scalar @tags < $self->config->{max_addhost_menu_cluster_items} )
         {
             $menus{listbox} = $windows{addhost}->Listbox(
                 -selectmode => 'extended',
@@ -1488,11 +1498,11 @@ sub create_windows() {
         }
         $menus{listbox}->insert( 'end', sort @tags );
 
-        if(@external_tags) {
+        if (@external_tags) {
             $menus{addhost_text} = $windows{addhost}->add(
-              'Label',  
-              -class => 'cssh',
-              -text => '* is external',
+                'Label',
+                -class => 'cssh',
+                -text  => '* is external',
             )->pack();
 
             #$menus{addhost_text}->insert('end','lkjh lkjj sdfl jklsj dflj ');
@@ -1869,6 +1879,14 @@ sub populate_send_menu {
                         . $self->config->{macro_newline} );
             },
         );
+        $menus{send}->command(
+            -label   => 'Random Number',
+            -command => sub {
+                $self->send_variable_text_to_all_servers(
+                    sub { int( rand(1024) ) } ),
+                    ;
+            },
+        );
     }
     else {
         $self->debug(
@@ -1911,8 +1929,20 @@ sub run {
 
     $self->debug( 2, "VERSION: $VERSION" );
 
-    $self->config->{ssh_args} = $self->options->options
-        if ( $self->options->options );
+    # only use ssh_args from options if config file ssh_args not set AND
+    # options is not the default value otherwise the default options
+    # value is used instead of the config file
+    if ( $self->config->{ssh_args} ) {
+        if (   $self->options->options
+            && $self->options->options ne $self->options->options_default )
+        {
+            $self->config->{ssh_args} = $self->options->options;
+        }
+    }
+    else {
+        $self->config->{ssh_args} = $self->options->options
+            if ( $self->options->options );
+    }
 
     $self->config->{terminal_args} = $self->options->term_args
         if ( $self->options->term_args );
@@ -1946,9 +1976,9 @@ sub run {
         print "\t", $_, $/ foreach ( sort( $self->cluster->list_tags ) );
 
         my @external_clusters = $self->cluster->list_external_clusters;
-        if(@external_clusters) {
+        if (@external_clusters) {
             print( 'Available external command tags:', $/ );
-            print "\t", $_, $/ foreach ( sort( @external_clusters ) );
+            print "\t", $_, $/ foreach ( sort(@external_clusters) );
         }
 
         $self->debug(
@@ -2129,6 +2159,8 @@ the code until this time.
 =item set_half_inactive
 
 =item setup_repeat
+
+=item send_variable_text_to_all_servers
 
 =item show_console
 

@@ -3,7 +3,7 @@ package App::ClusterSSH;
 use 5.008.004;
 use warnings;
 use strict;
-use version; our $VERSION = version->new('4.03_03');
+use version; our $VERSION = version->new('4.03_04');
 
 use Carp qw/cluck/;
 
@@ -55,9 +55,9 @@ sub new {
     my $self = $class->SUPER::new(%args);
 
     $self->{cluster} = App::ClusterSSH::Cluster->new( parent => $self, );
+    $self->{options} = App::ClusterSSH::Getopt->new( parent => $self, );
     $self->{config}  = App::ClusterSSH::Config->new( parent => $self, );
     $self->{helper}  = App::ClusterSSH::Helper->new( parent => $self, );
-    $self->{options} = App::ClusterSSH::Getopt->new( parent => $self, );
 
     # catch and reap any zombies
     $SIG{CHLD} = sub {
@@ -1209,7 +1209,7 @@ sub add_host_by_name() {
         $self->debug( 2, "host=", $menus{host_entry} );
         my @names
             = $self->resolve_names( split( /\s+/, $menus{host_entry} ) );
-        $self->debug( 0, 'Opening to: ', join( ' ', @names ) );
+        $self->debug( 0, 'Opening to: ', join( ' ', @names ) ) if (@names);
         $self->open_client_windows(@names);
     }
 
@@ -2011,7 +2011,7 @@ sub run {
     $self->debug( 2, "Capture map events" );
     $self->capture_map_events();
 
-    $self->debug( 0, 'Opening to: ', join( ' ', @servers ) );
+    $self->debug( 0, 'Opening to: ', join( ' ', @servers ) ) if (@servers);
     $self->open_client_windows(@servers);
 
     # Check here if we are tiling windows.  Here instead of in func so

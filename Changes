@@ -1,3 +1,8 @@
+4.04_04 2014-12-12 Duncan Ferguson <duncan_ferguson@user.sf.net>
+- Do not use system perl but whatever is found in PATH (to stop breaking perlbrew based builds)
+- Warn when the configured terminal isn't installed/found
+- Don't show 'Opening to:' when no servers are given
+
 4.03_03 2014-09-28 Duncan Ferguson <duncan_ferguson@user.sf.net>
 - Force tests to have English locale when user has something else set (Github issue: 10) (thanks to Emanuele Tomasi)
 - Skip permissions check test when run as root as the results are invalid (Github issue: 11) (thanks to Deny Dias)
